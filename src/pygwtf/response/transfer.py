@@ -277,6 +277,17 @@ def get_XYZ_TFs(f, P_lm, k, p, n, tdi2):
 
 
 @njit
+def get_AET_TFs(f, P_lm, k, p, n, tdi2):
+    X, Y, Z = get_XYZ_TFs(f, P_lm, k, p, n, tdi2)
+
+    A = (Z - X) / 2.0**0.5
+    E = (X - 2.0 * Y + Z) / 6.0**0.5
+    T = (X + Y + Z) / 3.0**0.5
+
+    return A, E, T
+
+
+@njit
 def get_AET_TFs_equal_armlength(f, P_lm, k, p, n, tdi2):
     L = L = 2.5e9  # remove with unequal
 
