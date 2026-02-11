@@ -323,7 +323,7 @@ def get_AET_TFs_equal_armlength(f, P_lm, k, p, n, tdi2):
     )
 
     if tdi2:
-        tdi2_factor = -2.0 * 1j * sin(4.0 * x) * exp(1j * 4.0 * x)
+        tdi2_factor = 1.0 - exp(8j * x)
     else:
         tdi2_factor = 1.0
 
