@@ -5,6 +5,7 @@ from numpy.typing import ArrayLike
 from ..base import AnalyticModel
 from .common import (
     _get_amplitude,
+    _get_hplus_hcross,
     _get_phi_f_fdot,
     _get_time_to_coalescence_cpu_wrap,
     _get_time_to_coalescence_gpu_wrap,
@@ -45,6 +46,10 @@ class TaylorT2Ecc(AnalyticModel):
     @property
     def phi_f_fdot_function(self) -> Callable:
         return _get_phi_f_fdot
+
+    @property
+    def get_TT_polarisations_function(self) -> Callable:
+        return _get_hplus_hcross
 
     def get_time_bounds(
         self, parameters: ArrayLike, frequency_band: tuple[float, float]

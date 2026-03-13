@@ -85,6 +85,17 @@ class AnalyticModel(ABC):
           for a single source (in the order specified by the `parameters` method).
         """
 
+    @property
+    def get_TT_polarisations_function(self) -> Callable | None:
+        """
+        The numba-compiled function that computes the plus and cross polarisations of the waveform at a given time, frequency and frequency derivative.
+        This function is only required for non-TDI waveform generation.
+        This function should have the signature `hplus_hcross(hlm, parameters)` where `parameters` is a 1D array containing the input parameters
+          for a single source (in the order specified by the `parameters` method) and `hlm` is the multipole.
+        The default implementation of this method returns None for flexibility, as not all models will require this function.
+        """
+        return None
+
     def get_time_bounds(
         self, parameters: ArrayLike, frequency_band: tuple[float, float]
     ) -> tuple[ArrayLike, ArrayLike] | None:
