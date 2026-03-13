@@ -3,19 +3,17 @@ from ..utils import complex_inner_product
 from ..response.transfer import fill_k, fill_P_lm
 from numba import cuda, njit
 import numpy as np
+from typing import Callable
 
 
 def analytic_kernel_constructor(
-        config,
-        _get_amplitude,
-        _get_time_to_coalescence,
-        _get_phi_f_fdot,
-        _get_channels,
-        gpu=True,
-        compute_statistic=False,
-        tdi_type=None
+        config: dict,
+        _get_amplitude: Callable,
+        _get_phi_f_fdot: Callable,
+        _get_channels: Callable,
+        compute_statistic: bool = False,
+        tdi_type: int | None = None
     ):
-    nT = config['nT']
     dT = config['dT']
     nF = config['nF']
     dF = config['dF']
@@ -27,12 +25,16 @@ def analytic_kernel_constructor(
         tdi2 = False
     else:
         tdi = True
-        tdi2 = tdi_type
-        assert isinstance(tdi2, int)
+        if tdi_type == 1:
+            tdi2 = False
+        elif tdi_type == 2:
+            tdi2 = True
+        else:
+            raise ValueError(f"Invalid tdi_type: {tdi_type}. Must be 1, 2, or None.")
 
     @cuda.jit
-    def kernel_gpu(channels, parameters, parameters_response, spacecraft_orbits, statistic, psds):
-        src_num = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x  # one source per thread
+    def kernel_gpu(channels, segment_start_inds, segment_end_inds, parameters, parameters_response, spacecraft_orbits, statistic, psds):
+        src_num = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x  # one source per thread 
         if src_num < parameters.shape[0]:
             params_source = cuda.local.array(nparams, dtype=np.float64)
             for i in range(nparams):
@@ -48,15 +50,11 @@ def analytic_kernel_constructor(
                     params_source_response[i] = parameters_response[src_num, i]
                 fill_P_lm(P_lm, params_source_response)
                 fill_k(k, params_source_response)
-        
-            time_to_coalescence = _get_time_to_coalescence(params_source)
-            
-            for t_idx in range(nT):
+                    
+            for t_idx in range(segment_start_inds[src_num], segment_end_inds[src_num] + 1):
                 t_tranche = dT * t_idx
-                if t_tranche + dT > time_to_coalescence:
-                    break
 
-                phi0_mode, f0_mode, fdot_mode = _get_phi_f_fdot(t_tranche, time_to_coalescence, params_source)
+                phi0_mode, f0_mode, fdot_mode = _get_phi_f_fdot(t_tranche, params_source)
                 amp_mode = _get_amplitude(t_tranche, f0_mode, fdot_mode, params_source)
 
                 start_ind = int(f0_mode / dF)
@@ -106,7 +104,7 @@ def analytic_kernel_constructor(
 
 
     @njit
-    def kernel_cpu(channels, parameters, parameters_response, spacecraft_orbits, statistic, psds):
+    def kernel_cpu(channels, segment_start_inds, segment_end_inds, parameters, parameters_response, spacecraft_orbits, statistic, psds):
         for src_num in range(parameters.shape[0]):
             params_source = np.zeros(nparams, dtype=np.float64)
             for i in range(nparams):
@@ -123,14 +121,10 @@ def analytic_kernel_constructor(
                 fill_P_lm(P_lm, params_source_response)
                 fill_k(k, params_source_response)
         
-            time_to_coalescence = _get_time_to_coalescence(params_source)
-            
-            for t_idx in range(nT):
+            for t_idx in range(segment_start_inds[src_num], segment_end_inds[src_num] + 1):
                 t_tranche = dT * t_idx
-                if t_tranche + dT > time_to_coalescence:
-                    break
 
-                phi0_mode, f0_mode, fdot_mode = _get_phi_f_fdot(t_tranche, time_to_coalescence, params_source)
+                phi0_mode, f0_mode, fdot_mode = _get_phi_f_fdot(t_tranche, params_source)
                 amp_mode = _get_amplitude(t_tranche, f0_mode, fdot_mode, params_source)
 
                 start_ind = int(f0_mode / dF)
@@ -178,8 +172,5 @@ def analytic_kernel_constructor(
                     statistic[src_num, t_idx, 0] = d_h
                     statistic[src_num, t_idx, 1] = h_h
 
-    if gpu:
-        return kernel_gpu
-    else:
-        return kernel_cpu
+    return kernel_cpu, kernel_gpu
 
