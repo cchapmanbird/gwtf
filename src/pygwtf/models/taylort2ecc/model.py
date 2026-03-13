@@ -2,6 +2,7 @@ from typing import Callable
 
 from numpy.typing import ArrayLike
 
+from ...constants import MTsun, clight, pc
 from ..base import AnalyticModel
 from .common import (
     _get_amplitude,
@@ -34,6 +35,10 @@ class TaylorT2Ecc(AnalyticModel):
         ]
 
     def compute_derived_parameters(self, parameters: ArrayLike) -> None:
+        # dimensionalise parameters
+        parameters[:, 0] *= MTsun  # M
+        parameters[:, 4] *= pc / clight  # D
+
         if self.backend.uses_gpu:
             _get_time_to_coalescence_gpu_wrap(parameters[:, -1], parameters)
         else:

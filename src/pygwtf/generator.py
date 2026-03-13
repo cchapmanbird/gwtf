@@ -1,93 +1,122 @@
-from typing import Callable, Type
+from typing import Type
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from .backend import Backend, get_backend
 from .fresnel.kernel import analytic_kernel_constructor
 from .models.base import AnalyticModel
+from .response.orbits import get_analytic_orbits
+from .response.transfer import get_AET_TFs
 
 
 class AnalyticTimeFrequencyWaveform:
     """
     Analytic time-frequency waveform generator.
 
-    Constructs Fresnel-approximation kernels (from ``pygwtf.fresnel``) for both
-    waveform generation and inner-product statistic evaluation, driven by a
-    physical model.  Four compiled kernels are built at construction time — CPU
-    and GPU variants for each of the waveform and statistic paths.  The active
-    pair is exposed via the ``waveform_kernel`` / ``statistic_kernel`` properties
-    according to the chosen backend.
+    Constructs generative kernels of the chosen prescription (only Fresnel currently supported)
+    for both waveform generation and inner-product evaluation in the time-frequency domain,
+    driven by a physical model. CPU or GPU operation is specified by the chosen backend.
 
     Parameters
     ----------
-    model_class : type[AnalyticModel]
+    model_class:
         The model class to instantiate (e.g. ``TaylorT2Ecc``).  Initialised
         inside this constructor with the chosen backend.
     config : dict
-        Kernel configuration.  Required keys: ``'dT'``, ``'nF'``, ``'dF'``,
-        ``'kernel_width'``.
+        Kernel configuration, with kwargs specific to the prescription used.
+    prescription : str, optional
+        The prescription to use for the kernel construction. Only ``'fresnel'`` is
+        currently supported.
     backend : str or Backend, optional
         Compute backend — ``'cpu'`` (default) or ``'gpu'``.
     tdi_type : {None, 1, 2}, optional
         TDI generation order.  ``None`` produces TT polarisations.
-    channel_fn : callable, optional
-        Channel function forwarded to the kernel constructor.
-        For TDI use e.g. ``get_AET_TFs`` or ``get_XYZ_TFs``; for TT
-        polarisations use e.g. ``_get_hplus_hcross``.
-    n_channels : int, optional
-        Number of output channels.  Defaults to 3 for TDI, 2 otherwise.
+        ``1`` produces first-generation TDI, and ``2`` produces second-generation TDI.
+    channels : array_like, optional
+        Pre-computed channels array of shape ``(nT, nF, n_channels)
+        ``. Required for statistic evaluation if not supplied at call time.
+    psds : array_like, optional
+        Pre-computed PSD array of shape ``(nT, nF, n_channels)
+        ``. Required for statistic evaluation if not supplied at call time.
+    spacecraft_orbits : array_like, optional
+        Pre-computed spacecraft orbits array of shape ``(nT, 3,
+        3)``. Required for TDI generation if not supplied at initialisation, in which case analytic orbits will be used.
     """
 
     def __init__(
         self,
         model_class: Type[AnalyticModel],
         config: dict,
+        prescription: str = "fresnel",
         backend: str | Backend = "cpu",
         tdi_type: int | None = None,
-        channel_fn: Callable | None = None,
-        n_channels: int | None = None,
+        channels: ArrayLike | None = None,
+        psds: ArrayLike | None = None,
+        spacecraft_orbits: ArrayLike | None = None,
     ):
         self.backend = (
             get_backend(backend) if isinstance(backend, str) else backend
         )
         self.model = model_class(backend=self.backend)
         self.config = config
-        self.tdi_type = tdi_type
 
-        if n_channels is not None:
-            self.n_channels = n_channels
-        elif tdi_type is not None:
-            self.n_channels = 3
-        else:
+        assert np.all(
+            [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
+        ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
+        self.config["dt"] = 1 / (self.config["nF"] * self.config["dF"])
+        self.t_tranche = (
+            self.backend.xp.arange(self.config["nT"]) * self.config["dT"]
+        )
+        self.f_tranche = (
+            self.backend.xp.arange(self.config["nF"]) * self.config["dF"]
+        )
+
+        self.tdi_type = tdi_type
+        if self.tdi_type is None:
+            channel_fn = self.model.get_TT_polarisations_function
             self.n_channels = 2
+            spacecraft_orbits = self.backend.xp.zeros(
+                (self.config["nT"], 3, 3), dtype=np.float64
+            )
+        else:
+            channel_fn = get_AET_TFs
+            self.n_channels = 3
+            if spacecraft_orbits is None:
+                print(
+                    "Spacecraft orbits not supplied. Falling back to analytic orbits"
+                )
+                spacecraft_orbits = get_analytic_orbits(self.t_tranche)
+            else:
+                assert spacecraft_orbits.shape == (self.config["nT"], 3, 3), (
+                    f"Spacecraft orbits array must have shape {(self.config['nT'], 3, 3)}"
+                )
+
+        self.spacecraft_orbits = spacecraft_orbits
 
         kernel_config = {
-            **config,
+            **self.config,
             "nparams": self.model.num_parameters
             + self.model.num_derived_parameters,
         }
 
-        if channel_fn is None:
-            raise ValueError(
-                "channel_fn must be provided (e.g. get_AET_TFs or _get_hplus_hcross)."
-            )
+        constructor_args = (
+            kernel_config,
+            self.model.amplitude_function,
+            self.model.phi_f_fdot_function,
+            channel_fn,
+        )
 
         self.waveform_kernel_cpu, self.waveform_kernel_gpu = (
-            analytic_kernel_constructor(
-                kernel_config,
-                self.model.amplitude_function,
-                self.model.phi_f_fdot_function,
-                channel_fn,
+            analytic_kernel_constructor(  # type: ignore
+                *constructor_args,
                 compute_statistic=False,
                 tdi_type=tdi_type,
             )
         )
         self.statistic_kernel_cpu, self.statistic_kernel_gpu = (
-            analytic_kernel_constructor(
-                kernel_config,
-                self.model.amplitude_function,
-                self.model.phi_f_fdot_function,
-                channel_fn,
+            analytic_kernel_constructor(  # type: ignore
+                *constructor_args,
                 compute_statistic=True,
                 tdi_type=tdi_type,
             )
@@ -95,9 +124,27 @@ class AnalyticTimeFrequencyWaveform:
 
         self._param_cache = None
 
-    # ------------------------------------------------------------------
-    # active kernel properties
-    # ------------------------------------------------------------------
+        if channels is not None:
+            assert channels.shape == (
+                self.config["nT"],
+                self.config["nF"],
+                self.n_channels,
+            ), (
+                f"Channels array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
+            )
+
+        self.channels = channels
+
+        if psds is not None:
+            assert psds.shape == (
+                self.config["nT"],
+                self.config["nF"],
+                self.n_channels,
+            ), (
+                f"PSDs array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
+            )
+
+        self.psds = psds
 
     @property
     def waveform_kernel(self):
@@ -117,12 +164,10 @@ class AnalyticTimeFrequencyWaveform:
             else self.statistic_kernel_cpu
         )
 
-    # ------------------------------------------------------------------
-    # parameter management
-    # ------------------------------------------------------------------
-
-    def _load_parameters(self, parameters) -> np.ndarray:
-        """Copy *parameters* into the internal cache, realloc if source count changes.
+    def _load_parameters(
+        self, parameters: dict | ArrayLike
+    ) -> tuple[np.ndarray, bool]:
+        """Copy parameters into the internal cache, realloc if source count changes.
 
         Parameters
         ----------
@@ -138,16 +183,27 @@ class AnalyticTimeFrequencyWaveform:
         n_phys = self.model.num_parameters
         n_total = n_phys + self.model.num_derived_parameters
 
+        single_source = False
         if isinstance(parameters, dict):
+            try:
+                if len(parameters[self.model.parameters[0]]) == 0:
+                    single_source = True
+            except TypeError:
+                single_source = True
+
             raw = xp.stack(
                 [
-                    xp.asarray(parameters[name], dtype=np.float64)
+                    xp.atleast_1d(
+                        xp.asarray(parameters[name], dtype=np.float64)
+                    )
                     for name in self.model.parameters
                 ],
                 axis=1,
             )
         else:
-            raw = xp.asarray(parameters, dtype=np.float64)
+            if parameters.ndim == 1:
+                single_source = True
+            raw = xp.atleast_2d(xp.asarray(parameters), dtype=np.float64)
 
         n_sources = raw.shape[0]
 
@@ -162,11 +218,12 @@ class AnalyticTimeFrequencyWaveform:
         self._param_cache[:, :n_phys] = raw
         self.model.compute_derived_parameters(self._param_cache)
 
-        return self._param_cache
+        return self._param_cache, single_source
 
     def _compute_segment_indices(self, parameters_cache):
         """Derive per-source time-segment indices from the model's time bounds."""
         xp = self.backend.xp
+        nT = self.config["nT"]
         dT = self.config["dT"]
         dF = self.config["dF"]
         nF = self.config["nF"]
@@ -174,34 +231,32 @@ class AnalyticTimeFrequencyWaveform:
 
         bounds = self.model.get_time_bounds(parameters_cache, frequency_band)
         if bounds is None:
-            raise ValueError(
-                "Model.get_time_bounds returned None. "
-                "Pass segment_start_inds and segment_end_inds explicitly."
+            segment_start_inds = xp.zeros(
+                parameters_cache.shape[0], dtype=np.int64
             )
-        t_start, t_end = bounds
-        segment_start_inds = xp.floor(
-            xp.asarray(t_start, dtype=np.float64) / dT
-        ).astype(np.int64)
-        segment_end_inds = xp.floor(
-            xp.asarray(t_end, dtype=np.float64) / dT
-        ).astype(np.int64)
+            segment_end_inds = xp.full(
+                parameters_cache.shape[0], nT - 1, dtype=np.int64
+            )
+        else:
+            t_start, t_end = bounds
+            segment_start_inds = xp.floor(
+                xp.asarray(t_start, dtype=np.float64) / dT
+            ).astype(np.int64)
+            segment_end_inds = xp.floor(
+                xp.asarray(t_end, dtype=np.float64) / dT
+            ).astype(np.int64)
+            segment_start_inds = xp.clip(segment_start_inds, 0, nT - 1)
+            segment_end_inds = xp.clip(segment_end_inds, 0, nT - 1)
         return segment_start_inds, segment_end_inds
-
-    # ------------------------------------------------------------------
-    # call
-    # ------------------------------------------------------------------
 
     def __call__(
         self,
-        parameters,
-        channels_or_data=None,
-        psds=None,
-        segment_start_inds=None,
-        segment_end_inds=None,
-        parameters_response=None,
-        spacecraft_orbits=None,
-        statistic=None,
-        return_statistic: bool = False,
+        parameters: dict | ArrayLike,
+        channels: ArrayLike | None = None,
+        psds: ArrayLike | None = None,
+        parameters_response: ArrayLike | None = None,
+        out: ArrayLike | None = None,
+        compute_statistic: bool = False,
     ):
         """Evaluate the analytic waveform or inner-product statistic.
 
@@ -209,25 +264,22 @@ class AnalyticTimeFrequencyWaveform:
         ----------
         parameters : dict or array_like, shape (n_sources, n_params)
             Source parameters as a named dict or a 2-D array in model order.
-        channels_or_data : array_like or None
-            *Waveform mode*: pre-allocated output of shape
-            ``(n_sources, nT, nF, n_channels)``; auto-allocated if ``None``.
-            *Statistic mode*: data array of shape ``(nT, nF, n_channels)``.
+        channels : array_like or None
+            Data array of shape ``(nT, nF, n_channels)``. If not supplied
+            will use the stored channels from initialisation.
         psds : array_like, optional
             Power spectral densities, shape ``(nT, nF, n_channels)``.
-            Required for statistic mode.
-        segment_start_inds, segment_end_inds : array_like of int, optional
-            Per-source start/end tranche indices.  Derived automatically from
-            ``model.get_time_bounds`` if not provided.
+            Required for statistic output. If not supplied
+            will use the stored psds from initialisation.
         parameters_response : array_like, shape (n_sources, 4), optional
             Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``.
-            Required for TDI mode.
-        spacecraft_orbits : array_like, shape (nT, 3, 3), optional
-            Pre-computed orbit positions.  Required for TDI mode.
-        statistic : array_like or None
-            Pre-allocated output of shape ``(n_sources, nT, 2)``.
-            Auto-allocated if ``None`` when ``return_statistic=True``.
-        return_statistic : bool, optional
+            Required when using TDI.
+        out : array_like or None
+            *Waveform output*: pre-allocated output of shape
+            ``(n_sources, nT, nF, n_channels)``; auto-allocated if ``None``.
+            *Statistic output*: pre-allocated output of shape ``(n_sources, nT)``.
+            Auto-allocated if ``None``.
+        compute_statistic : bool, optional
             Return the inner-product statistic instead of the channels array.
 
         Returns
@@ -238,69 +290,72 @@ class AnalyticTimeFrequencyWaveform:
             when ``return_statistic=True``.
         """
         xp = self.backend.xp
-        params = self._load_parameters(parameters)
+        params, single_source = self._load_parameters(parameters)
         n_sources = params.shape[0]
 
-        if segment_start_inds is None or segment_end_inds is None:
-            segment_start_inds, segment_end_inds = (
-                self._compute_segment_indices(params)
-            )
-        else:
-            segment_start_inds = xp.asarray(segment_start_inds, dtype=np.int64)
-            segment_end_inds = xp.asarray(segment_end_inds, dtype=np.int64)
+        segment_start_inds, segment_end_inds = self._compute_segment_indices(
+            params
+        )
 
-        nT = int(segment_end_inds.max()) + 1
+        nT = self.config["nT"]
         nF = self.config["nF"]
 
-        # Build placeholder arrays for arguments unused in the current mode.
-        _dummy_response = xp.zeros((n_sources, 4), dtype=np.float64)
-        _dummy_orbits = xp.zeros((nT, 3, 3), dtype=np.float64)
-        _dummy_psds = xp.zeros((nT, nF, self.n_channels), dtype=np.float64)
-        _dummy_stat = xp.zeros((1, 1, 2), dtype=np.complex128)
+        if parameters_response is None:
+            if self.tdi_type is None:
+                parameters_response = xp.zeros(
+                    (n_sources, 4), dtype=np.float64
+                )
+            else:
+                raise ValueError(
+                    "parameters_response must be supplied for TDI generation."
+                )
+        else:
+            assert parameters_response.shape == (n_sources, 4), (
+                f"parameters_response must have shape {(n_sources, 4)}"
+            )
 
-        _params_response = (
-            xp.asarray(parameters_response, dtype=np.float64)
-            if parameters_response is not None
-            else _dummy_response
-        )
-        _orbits = (
-            xp.asarray(spacecraft_orbits, dtype=np.float64)
-            if spacecraft_orbits is not None
-            else _dummy_orbits
-        )
-        _psds = (
-            xp.asarray(psds, dtype=np.float64)
-            if psds is not None
-            else _dummy_psds
-        )
+        if compute_statistic:
+            if channels is None:
+                channels = self.channels
+                assert channels is not None, (
+                    "Channels must be supplied to compute the statistic."
+                )
+            if psds is None:
+                psds = self.psds
+                assert psds is not None, (
+                    "PSDs must be supplied to compute the statistic."
+                )
+            if parameters_response is None:
+                parameters_response = xp.zeros(
+                    (n_sources, 4), dtype=np.float64
+                )
+            if out is None:
+                out = xp.zeros((n_sources, nT, 2), dtype=np.complex128)
 
-        if return_statistic:
-            if statistic is None:
-                statistic = xp.zeros((n_sources, nT, 2), dtype=np.complex128)
             self.statistic_kernel(
-                channels_or_data,
+                channels,
                 segment_start_inds,
                 segment_end_inds,
                 params,
-                _params_response,
-                _orbits,
-                statistic,
-                _psds,
+                parameters_response,
+                self.spacecraft_orbits,
+                out,
+                psds,
             )
-            return statistic
         else:
-            if channels_or_data is None:
-                channels_or_data = xp.zeros(
+            if out is None:
+                out = xp.zeros(
                     (n_sources, nT, nF, self.n_channels), dtype=np.complex128
                 )
             self.waveform_kernel(
-                channels_or_data,
+                out,
                 segment_start_inds,
                 segment_end_inds,
                 params,
-                _params_response,
-                _orbits,
-                _dummy_stat,
-                _dummy_psds,
+                parameters_response,
+                self.spacecraft_orbits,
+                xp.zeros(1, dtype=np.complex128),
+                xp.zeros(1, dtype=np.float64),
             )
-            return channels_or_data
+
+        return out[0] if single_source else out

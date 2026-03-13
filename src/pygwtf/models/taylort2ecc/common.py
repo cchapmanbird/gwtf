@@ -606,7 +606,7 @@ def _d_foft_dt(t, tc, e0, M, eta, include_ecc_term=False):
 
 
 @jit
-def _get_phi_f_fdot(t, tc, parameters):
+def _get_phi_f_fdot(t, parameters):
     # M, eta, cosinc, e0, D, f0, coalescence_phase
 
     M = parameters[0]
@@ -614,6 +614,7 @@ def _get_phi_f_fdot(t, tc, parameters):
     e0 = parameters[3]
     f0 = parameters[5]
     phi_coal = parameters[6]
+    tc = parameters[7]
 
     v0 = (pi * M * f0) ** (1 / 3)
 
