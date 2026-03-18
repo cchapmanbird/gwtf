@@ -71,8 +71,9 @@ def analytic_kernel_constructor(
             phi0_mode, f0_mode, fdot_mode = _get_phi_f_fdot(
                 t_tranche, params_source
             )
-            amp_mode = _get_amplitude(
-                t_tranche, f0_mode, fdot_mode, params_source
+            amp_mode = (
+                _get_amplitude(t_tranche, f0_mode, fdot_mode, params_source)
+                / 2
             )
 
             start_ind = int(f0_mode / dF)
@@ -92,16 +93,13 @@ def analytic_kernel_constructor(
                 if f_idx > 0 and f_idx < nF:
                     f_bin = (f_idx + 1) * (dF)
 
-                    h_f_pos = (
-                        _fresnel_kernel(
-                            f_bin,
-                            amp_mode,
-                            phi0_mode,
-                            f0_mode,
-                            fdot_mode,
-                            dT,
-                        )
-                        / 2
+                    h_f_pos = _fresnel_kernel(
+                        f_bin,
+                        amp_mode,
+                        phi0_mode,
+                        f0_mode,
+                        fdot_mode,
+                        dT,
                     )
 
                     if not tdi:
