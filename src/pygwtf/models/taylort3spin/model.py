@@ -1,6 +1,6 @@
 from typing import Callable
 
-from numpy.typing import ArrayLike
+import numpy as np
 
 from ...constants import MTsun, clight, pc
 from ..base import AnalyticModel
@@ -57,7 +57,7 @@ class TaylorT3Spin(AnalyticModel):
             "s",
         ]
 
-    def compute_derived_parameters(self, parameters: ArrayLike) -> None:
+    def compute_derived_parameters(self, parameters: np.ndarray) -> None:
         # dimensionalise parameters
         parameters[:, 0] *= MTsun  # M
         parameters[:, 3] *= pc / clight  # D
@@ -91,8 +91,8 @@ class TaylorT3Spin(AnalyticModel):
         return _get_hplus_hcross
 
     def get_time_bounds(
-        self, parameters: ArrayLike, frequency_band: tuple[float, float]
-    ) -> tuple[ArrayLike, ArrayLike]:
+        self, parameters: np.ndarray, frequency_band: tuple[float, float]
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Computes the start and end times of the waveform for each source in the input parameter array.
         This is used to determine the time segments over which to compute the waveform for each source.

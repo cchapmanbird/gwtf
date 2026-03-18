@@ -1,7 +1,6 @@
 from typing import Type
 
 import numpy as np
-from numpy.typing import ArrayLike
 
 from .backend import Backend, get_backend
 from .fresnel.kernel import analytic_kernel_constructor
@@ -51,9 +50,9 @@ class AnalyticTimeFrequencyWaveform:
         prescription: str = "fresnel",
         backend: str | Backend = "cpu",
         tdi_type: int | None = None,
-        channels: ArrayLike | None = None,
-        psds: ArrayLike | None = None,
-        spacecraft_orbits: ArrayLike | None = None,
+        channels: np.ndarray | None = None,
+        psds: np.ndarray | None = None,
+        spacecraft_orbits: np.ndarray | None = None,
     ):
         self.backend = (
             get_backend(backend) if isinstance(backend, str) else backend
@@ -165,7 +164,7 @@ class AnalyticTimeFrequencyWaveform:
         )
 
     def _load_parameters(
-        self, parameters: dict | ArrayLike
+        self, parameters: dict | np.ndarray
     ) -> tuple[np.ndarray, bool]:
         """Copy parameters into the internal cache, realloc if source count changes.
 
@@ -251,11 +250,11 @@ class AnalyticTimeFrequencyWaveform:
 
     def __call__(
         self,
-        parameters: dict | ArrayLike,
-        channels: ArrayLike | None = None,
-        psds: ArrayLike | None = None,
-        parameters_response: ArrayLike | None = None,
-        out: ArrayLike | None = None,
+        parameters: dict | np.ndarray,
+        channels: np.ndarray | None = None,
+        psds: np.ndarray | None = None,
+        parameters_response: np.ndarray | None = None,
+        out: np.ndarray | None = None,
         compute_statistic: bool = False,
     ):
         """Evaluate the analytic waveform or inner-product statistic.
