@@ -178,15 +178,20 @@ def build_ysrl(f, k, n, p, P_lm):
     L13 = threevector_diff_norm(p, 0, 2)
 
     for j in range(3):
-        n[0, j] = (p[2, j] - p[1, j]) / L23
-        n[1, j] = (p[2, j] - p[0, j]) / L13
-        n[2, j] = (p[1, j] - p[0, j]) / L12
+        n[0, j] = (p[2, j] - p[1, j]) / L23  # 2->3
+        n[1, j] = (p[2, j] - p[0, j]) / L13  # 1->3
+        n[2, j] = (p[1, j] - p[0, j]) / L12  # 1->2
 
+    # expf_21 = expf_12
     expf_12 = exp(
         iomega_over_2c * (L12 + dot_three_unpack_sum(k, p, 0, 1))
-    )  # expf_21 = expf_12
-    expf_23 = exp(iomega_over_2c * (L23 + dot_three_unpack_sum(k, p, 1, 2)))
-    expf_13 = exp(iomega_over_2c * (L13 + dot_three_unpack_sum(k, p, 0, 2)))
+    )  # 1->2, 2->1
+    expf_23 = exp(
+        iomega_over_2c * (L23 + dot_three_unpack_sum(k, p, 1, 2))
+    )  # 2->3, 3->2
+    expf_13 = exp(
+        iomega_over_2c * (L13 + dot_three_unpack_sum(k, p, 0, 2))
+    )  # 1->3, 3->1
 
     k_dot_n1 = dot_three_unpack2(k, n, 0)
     k_dot_n2 = dot_three_unpack2(k, n, 1)
@@ -199,9 +204,9 @@ def build_ysrl(f, k, n, p, P_lm):
     sinc_factor_231 = sinc(pi * f * L23 / clight * (1 - k_dot_n1))
     sinc_factor_321 = sinc(pi * f * L23 / clight * (1 + k_dot_n1))
 
-    prod_1 = _matrix_res_pro(n[0, 0], n[0, 1], n[0, 2], P_lm)
-    prod_2 = _matrix_res_pro(n[1, 0], n[1, 1], n[1, 2], P_lm)
-    prod_3 = _matrix_res_pro(n[2, 0], n[2, 1], n[2, 2], P_lm)
+    prod_1 = _matrix_res_pro(n[0, 0], n[0, 1], n[0, 2], P_lm)  # 2->3, 3->2
+    prod_2 = _matrix_res_pro(n[1, 0], n[1, 1], n[1, 2], P_lm)  # 1->3, 3->1
+    prod_3 = _matrix_res_pro(n[2, 0], n[2, 1], n[2, 2], P_lm)  # 1->2, 2->1
 
     # the slr indices are those in sinc_factor
     ysrl_123 = iomega_over_2c * L12 * sinc_factor_123 * expf_12 * prod_3
