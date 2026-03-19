@@ -63,22 +63,31 @@ class AnalyticTimeFrequencyWaveform:
         assert np.all(
             [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
+        
         self.config["dt"] = 1 / (self.config["nF"] * self.config["dF"])
+
+        # Setting up time and frequency grid used by the kernels. 
         self.t_tranche = (
             self.backend.xp.arange(self.config["nT"]) * self.config["dT"]
         )
+
         self.f_tranche = (
             self.backend.xp.arange(self.config["nF"]) * self.config["dF"]
         )
 
         self.tdi_type = tdi_type
+
+        # If TDI type is not specified, do not compute TDI channels, instead go for the h_plus/h_cross polarisations.
         if self.tdi_type is None:
             channel_fn = self.model.get_TT_polarisations_function
             self.n_channels = 2
+            
+            # Fill in dummy orbits for non-TDI generation, as the kernel expects an array of this shape regardless. 
             spacecraft_orbits = self.backend.xp.zeros(
                 (self.config["nT"], 3, 3), dtype=np.float64
             )
         else:
+            # Only TDI-2 now. 
             channel_fn = get_AET_TFs
             self.n_channels = 3
             if spacecraft_orbits is None:
@@ -106,6 +115,7 @@ class AnalyticTimeFrequencyWaveform:
             channel_fn,
         )
 
+        # Construct waveform kernels, these are mainly used for debugging. 
         self.waveform_kernel_cpu, self.waveform_kernel_gpu = (
             analytic_kernel_constructor(  # type: ignore
                 *constructor_args,
@@ -113,6 +123,8 @@ class AnalyticTimeFrequencyWaveform:
                 tdi_type=tdi_type,
             )
         )
+        
+        # Construct inner-product kernels, these are the kernels used for the statistic evaluation, and to build search statistics/likelhoods.
         self.statistic_kernel_cpu, self.statistic_kernel_gpu = (
             analytic_kernel_constructor(  # type: ignore
                 *constructor_args,
@@ -202,7 +214,7 @@ class AnalyticTimeFrequencyWaveform:
         else:
             if parameters.ndim == 1:
                 single_source = True
-            raw = xp.atleast_2d(xp.asarray(parameters), dtype=np.float64)
+            raw = xp.atleast_2d(xp.asarray(parameters,dtype=np.float64))
 
         n_sources = raw.shape[0]
 
@@ -214,6 +226,7 @@ class AnalyticTimeFrequencyWaveform:
                 (n_sources, n_total), dtype=np.float64
             )
 
+        # Assign the physical parameters, then compute the derived parameters in-place in the cache.
         self._param_cache[:, :n_phys] = raw
         self.model.compute_derived_parameters(self._param_cache)
 
@@ -228,7 +241,9 @@ class AnalyticTimeFrequencyWaveform:
         nF = self.config["nF"]
         frequency_band = (dF, nF * dF)
 
+        # Fill in segment start and end indices based on the model's time bounds for the given parameters and frequency band. If no bounds are returned, default to the full segment.
         bounds = self.model.get_time_bounds(parameters_cache, frequency_band)
+    
         if bounds is None:
             segment_start_inds = xp.zeros(
                 parameters_cache.shape[0], dtype=np.int64
@@ -236,16 +251,22 @@ class AnalyticTimeFrequencyWaveform:
             segment_end_inds = xp.full(
                 parameters_cache.shape[0], nT - 1, dtype=np.int64
             )
+
         else:
             t_start, t_end = bounds
+
             segment_start_inds = xp.floor(
                 xp.asarray(t_start, dtype=np.float64) / dT
             ).astype(np.int64)
+
             segment_end_inds = xp.floor(
                 xp.asarray(t_end, dtype=np.float64) / dT
             ).astype(np.int64)
+
             segment_start_inds = xp.clip(segment_start_inds, 0, nT - 1)
+
             segment_end_inds = xp.clip(segment_end_inds, 0, nT - 1)
+
         return segment_start_inds, segment_end_inds
 
     def __call__(
@@ -276,10 +297,10 @@ class AnalyticTimeFrequencyWaveform:
         out : array_like or None
             *Waveform output*: pre-allocated output of shape
             ``(n_sources, nT, nF, n_channels)``; auto-allocated if ``None``.
-            *Statistic output*: pre-allocated output of shape ``(n_sources, nT)``.
+            *Statistic output*: pre-allocated output of shape ``(n_sources, nT, 2)``.
             Auto-allocated if ``None``.
         compute_statistic : bool, optional
-            Return the inner-product statistic instead of the channels array.
+            Return the inner-product statistics instead of the channels array.
 
         Returns
         -------
@@ -313,6 +334,7 @@ class AnalyticTimeFrequencyWaveform:
                 f"parameters_response must have shape {(n_sources, 4)}"
             )
 
+        # Compute likelihood/detection statistics
         if compute_statistic:
             if channels is None:
                 channels = self.channels
@@ -329,6 +351,7 @@ class AnalyticTimeFrequencyWaveform:
                     (n_sources, 4), dtype=np.float64
                 )
             if out is None:
+                # Allocate output array for statistic, shape (n_sources, nT, 2) for h_plus, h_cross. 
                 out = xp.zeros((n_sources, nT, 2), dtype=np.complex128)
 
             self.statistic_kernel(
@@ -341,6 +364,8 @@ class AnalyticTimeFrequencyWaveform:
                 out,
                 psds,
             )
+        
+        # Compute waveforms
         else:
             if out is None:
                 out = xp.zeros(

@@ -61,22 +61,25 @@ class TaylorT3Spin(AnalyticModel):
         # dimensionalise parameters
         parameters[:, 0] *= MTsun  # M
         parameters[:, 3] *= pc / clight  # D
-
+        
+        # 8th index is t_coal, filled inplace. 
         if self.backend.uses_gpu:
             _get_time_to_coalescence_gpu_wrap(parameters[:, 8], parameters)
         else:
             _get_time_to_coalescence_cpu_wrap(parameters[:, 8], parameters)
 
         M = parameters[:, 0]
+
+        # parameters[:, 1] is eta. 
         m1, m2 = etaM_to_m1m2(parameters[:, 1], M)
 
-        parameters[:, 9] = (m1 - m2) / M  # delta
+        parameters[:, 9] = (m1 - m2) / M  # delta 
         parameters[:, 10] = (
             m2 * parameters[:, 6] - m1 * parameters[:, 5]
-        ) / M  # sigma
+        ) / M  # sigma (reduced spin parameter)
         parameters[:, 11] = (
-            m2 * parameters[:, 6] - m1 * parameters[:, 5]
-        ) / M  # M
+            m1**2 * parameters[:, 5] + m2**2 * parameters[:, 6]
+        ) / M**2  # s (reduced spin parameter)
 
     @property
     def amplitude_function(self) -> Callable:
@@ -98,9 +101,11 @@ class TaylorT3Spin(AnalyticModel):
         This is used to determine the time segments over which to compute the waveform for each source.
         """
         t_coal = parameters[:, 8]
-
+        # T-start is always zero
         t_start = self.backend.xp.zeros_like(t_coal)
         t_end = self.backend.xp.zeros_like(t_coal)
+
+        # T-end is just the time when the source leaves the band. 
         if self.backend.uses_gpu:
             _get_time_to_f_gpu_wrap(
                 t_end, frequency_band[1], t_coal, parameters
