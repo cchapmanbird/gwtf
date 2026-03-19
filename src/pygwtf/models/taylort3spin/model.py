@@ -61,18 +61,14 @@ class TaylorT3Spin(AnalyticModel):
         # dimensionalise parameters
         parameters[:, 0] *= MTsun  # M
         parameters[:, 3] *= pc / clight  # D
-        
-        # 8th index is t_coal, filled inplace. 
-        if self.backend.uses_gpu:
-            _get_time_to_coalescence_gpu_wrap(parameters[:, 8], parameters)
-        else:
-            _get_time_to_coalescence_cpu_wrap(parameters[:, 8], parameters)
+
 
         M = parameters[:, 0]
 
         # parameters[:, 1] is eta. 
         m1, m2 = etaM_to_m1m2(parameters[:, 1], M)
 
+        # Need to compute these derived parameters for the time to coalescence calculation.
         parameters[:, 9] = (m1 - m2) / M  # delta 
         parameters[:, 10] = (
             m2 * parameters[:, 6] - m1 * parameters[:, 5]
@@ -80,6 +76,12 @@ class TaylorT3Spin(AnalyticModel):
         parameters[:, 11] = (
             m1**2 * parameters[:, 5] + m2**2 * parameters[:, 6]
         ) / M**2  # s (reduced spin parameter)
+        
+        # 8th index is t_coal, filled inplace. 
+        if self.backend.uses_gpu:
+            _get_time_to_coalescence_gpu_wrap(parameters[:, 8], parameters)
+        else:
+            _get_time_to_coalescence_cpu_wrap(parameters[:, 8], parameters)
 
     @property
     def amplitude_function(self) -> Callable:

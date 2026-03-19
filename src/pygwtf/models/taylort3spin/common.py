@@ -487,15 +487,14 @@ def _get_time_to_coalescence(M, eta, f0, delta, sigma, s):
 def _get_time_to_coalescence_cpu_wrap(t_coal, parameters):
     for i in range(len(t_coal)):
         t_coal[i] = _get_time_to_coalescence(
-            parameters[i, 0],
-            parameters[i, 1],
-            parameters[i, 4],
-            parameters[i, 9],
-            parameters[i, 10],
-            parameters[i, 11],
+            parameters[i, 0],#M
+            parameters[i, 1],#eta
+            parameters[i, 4],#f0
+            parameters[i, 9],#delta
+            parameters[i, 10],#sigma
+            parameters[i, 11],#s
         )
-
-
+        
 @cuda.jit
 def _get_time_to_coalescence_gpu_wrap(t_coal, parameters):
     idx = cuda.grid(1)
