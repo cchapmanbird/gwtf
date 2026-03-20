@@ -2,8 +2,7 @@ import numpy as np
 import scipy
 from astropy.coordinates import BarycentricMeanEcliptic, SkyCoord
 
-from ..constants import R, f_m
-
+from ..constants import R, f_m, clight
 
 def Orbit(
     t, initial_ecliptic_longitude, e, n, initial_orientation_of_constellation=0
@@ -169,8 +168,33 @@ def read_in_mojito_orbit(filepath: str):
 
     return (pos_sc1, pos_sc2, pos_sc3, orbital_times_shifted)
 
+def read_in_mojito_ltts(filepath: str):
+    '''
+    Read in mojito LTT file. 
+    Should really do this in a better way, currently requires a unique LTT file which contains the LTTs for each link (assuming symmetric LTTs for now). 
+    Following same time conventions as the orbit file mojito. (Assuming that the LTT times are already subset to the data collection time in preprocessing.)
 
-def generate_mojito_orbit_splines_resample(mojito_orbit_filepath, t_sft):
+    Only extracts: {12, 23, 31} links for now, but can extract full set {12, 23, 31, 13, 32, 21}
+
+    Args:
+        filepath (str): Path to the Mojito LTT file
+    Returns:
+        ltts (numpy.array): Array of shape (N_times, 3) containing the LTTs for the 3 links (12, 23, 31) as a function of time.
+    '''
+    ltt_file = np.load(filepath)
+
+    L12 = ltt_file['ltts'][:, 0]
+    L23 = ltt_file['ltts'][:, 1]
+    L31 = ltt_file['ltts'][:, 2]
+
+    LTT_times_shifted = ltt_file['ltt_times'] - ltt_file['ltt_times'][0] # Shift to start at zero, same convention as the orbit file.
+
+
+    return(L12, L23, L31, LTT_times_shifted)
+
+def generate_mojito_orbit_splines_resample(mojito_orbit_filepath: str, 
+                                           mojito_ltt_filepath: str,
+                                           t_sft: np.ndarray):
     """
     Generates orbit splines from a mojito orbit file. Then evaluate them on SFT time grid.
 
@@ -193,4 +217,38 @@ def generate_mojito_orbit_splines_resample(mojito_orbit_filepath, t_sft):
 
     p_fine = cubic_temp_interpolant(SFT_midpoint_times).T
 
-    return p_fine
+    L12, L23, L31, LTT_times = read_in_mojito_ltts(
+        mojito_ltt_filepath
+    )
+
+    Ls = np.array([L12, L23, L31])
+
+    cubic_temp_interpolant_LTTs = scipy.interpolate.CubicSpline(
+        x=LTT_times, y=Ls.T, axis=0, extrapolate=True
+    )  # This is a cubic interpolant over the original orbital times.
+
+    LTTs_fine = cubic_temp_interpolant_LTTs(SFT_midpoint_times)
+
+
+    return p_fine, LTTs_fine
+
+def get_analytic_ltts(spacecraft_orbits):
+    """
+    Get the analytic light travel times for each link as a function of time, given the spacecraft orbits.
+    This is used for TDI generation.
+
+    Args:
+        spacecraft_orbits (numpy.array): Array of shape (nT, 3, 3) containing the positions of the 3 spacecraft as a function of time.
+
+    Returns:
+        ltts (numpy.array): Array of shape (nT, 3) containing the LTTs for the 3 links (12, 23, 31) as a function of time.
+    """
+    sc1 = spacecraft_orbits[:, 0, :]
+    sc2 = spacecraft_orbits[:, 1, :]
+    sc3 = spacecraft_orbits[:, 2, :]
+
+    L12 = np.linalg.norm(sc1 - sc2, axis=1)/clight
+    L23 = np.linalg.norm(sc2 - sc3, axis=1)/clight
+    L31 = np.linalg.norm(sc3 - sc1, axis=1)/clight
+
+    return L12, L23, L31

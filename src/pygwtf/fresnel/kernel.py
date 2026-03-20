@@ -50,6 +50,8 @@ def analytic_kernel_constructor(
         k,
         n,
         p,
+        Ls,
+        spacecraft_ltts,
         spacecraft_orbits,
         statistic,
         psds,
@@ -80,13 +82,20 @@ def analytic_kernel_constructor(
             d_h = 0.0 + 0.0j
             h_h = 0.0 + 0.0j
 
+
             if tdi:
+                                
+                # Fill in LTTs for this time step.
+                for i in range(3):
+                    Ls[i] = spacecraft_ltts[t_idx, i]
+
                 for i in range(3):
                     for j in range(3):
                         p[i, j] = spacecraft_orbits[t_idx, i, j]
                 transfer_functions = _get_channels(
-                    f0_mode, P_lm, k, p, n, tdi2
+                    f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
+
 
             for f_rel_idx in range(-kernel_width, kernel_width):
                 f_idx = start_ind + f_rel_idx
@@ -131,6 +140,7 @@ def analytic_kernel_constructor(
         parameters,
         parameters_response,
         spacecraft_orbits,
+        spacecraft_ltts,
         statistic,
         psds,
     ):
@@ -143,6 +153,7 @@ def analytic_kernel_constructor(
             k = cuda.local.array((3,), dtype=np.float64)
             n = cuda.local.array((3, 3), dtype=np.float64)
             p = cuda.local.array((3, 3), dtype=np.float64)
+            Ls = cuda.local.array((3,), dtype=np.float64)
             params_source_response = cuda.local.array(4, dtype=np.float64)
             kernel_inner(
                 src_num,
@@ -157,6 +168,8 @@ def analytic_kernel_constructor(
                 k,
                 n,
                 p,
+                Ls,
+                spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
                 psds,
@@ -170,6 +183,7 @@ def analytic_kernel_constructor(
         parameters,
         parameters_response,
         spacecraft_orbits,
+        spacecraft_ltts,
         statistic,
         psds,
     ):
@@ -179,6 +193,7 @@ def analytic_kernel_constructor(
             k = np.zeros((3,), dtype=np.float64)
             n = np.zeros((3, 3), dtype=np.float64)
             p = np.zeros((3, 3), dtype=np.float64)
+            Ls = np.zeros((3,), dtype=np.float64)
             params_source_response = np.zeros(4, dtype=np.float64)
             kernel_inner(
                 src_num,
@@ -193,6 +208,8 @@ def analytic_kernel_constructor(
                 k,
                 n,
                 p,
+                Ls,
+                spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
                 psds,

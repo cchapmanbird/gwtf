@@ -5,7 +5,7 @@ import numpy as np
 from .backend import Backend, get_backend
 from .fresnel.kernel import analytic_kernel_constructor
 from .models.base import AnalyticModel
-from .response.orbits import get_analytic_orbits
+from .response.orbits import get_analytic_orbits, get_analytic_ltts
 from .response.transfer import get_AET_TFs
 
 
@@ -41,6 +41,9 @@ class AnalyticTimeFrequencyWaveform:
     spacecraft_orbits : array_like, optional
         Pre-computed spacecraft orbits array of shape ``(nT, 3,
         3)``. Required for TDI generation if not supplied at initialisation, in which case analytic orbits will be used.
+    spacecraft_ltts: array_like, optional
+        Pre-computed spacecraft light travel times array of shape ``(nT, 3)``. 
+        Required for TDI generation if not supplied at initialisation, in which case will be calculated analytically from positions
     """
 
     def __init__(
@@ -53,6 +56,7 @@ class AnalyticTimeFrequencyWaveform:
         channels: np.ndarray | None = None,
         psds: np.ndarray | None = None,
         spacecraft_orbits: np.ndarray | None = None,
+        spacecraft_ltts: np.ndarray | None = None,
     ):
         self.backend = (
             get_backend(backend) if isinstance(backend, str) else backend
@@ -101,6 +105,18 @@ class AnalyticTimeFrequencyWaveform:
                 )
 
         self.spacecraft_orbits = spacecraft_orbits
+
+        if spacecraft_ltts is None:
+            print(
+                "Spacecraft light travel times not supplied. Falling back to analytic calculation"
+            )
+            spacecraft_ltts = get_analytic_ltts(self.spacecraft_orbits)
+        else:
+            assert spacecraft_ltts.shape == (self.config["nT"], 3), (
+                f"Spacecraft light travel times array must have shape {(self.config['nT'], 3)}"
+            )
+
+        self.spacecraft_ltts = spacecraft_ltts
 
         kernel_config = {
             **self.config,
@@ -361,6 +377,7 @@ class AnalyticTimeFrequencyWaveform:
                 params,
                 parameters_response,
                 self.spacecraft_orbits,
+                self.spacecraft_ltts,
                 out,
                 psds,
             )
@@ -378,6 +395,7 @@ class AnalyticTimeFrequencyWaveform:
                 params,
                 parameters_response,
                 self.spacecraft_orbits,
+                self.spacecraft_ltts,
                 xp.zeros(1, dtype=np.complex128),
                 xp.zeros(1, dtype=np.float64),
             )

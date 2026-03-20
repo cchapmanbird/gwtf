@@ -159,7 +159,7 @@ def threevector_diff_norm(x, i, j):
 
 
 @njit
-def build_ysrl(f, k, n, p, P_lm):
+def build_ysrl(f, k, n, p, Ls, P_lm):
     """
     Builds all the y_slr
 
@@ -173,9 +173,9 @@ def build_ysrl(f, k, n, p, P_lm):
 
     iomega_over_2c = 1j * pi * f / (clight)
 
-    L12 = threevector_diff_norm(p, 0, 1)
-    L23 = threevector_diff_norm(p, 1, 2)
-    L13 = threevector_diff_norm(p, 0, 2)
+    L12 = Ls[0]
+    L23 = Ls[1]
+    L13 = Ls[2]
 
     for j in range(3):
         n[0, j] = (p[2, j] - p[1, j]) / L23  # 2->3
@@ -221,26 +221,24 @@ def build_ysrl(f, k, n, p, P_lm):
         ysrl_132,
         ysrl_312,
         ysrl_231,
-        ysrl_321,
-        L12,
-        L23,
-        L13,
+        ysrl_321
     )
 
 
 @njit
-def get_XYZ_TFs(f, P_lm, k, p, n, tdi2):
+def get_XYZ_TFs(f, P_lm, k, p, Ls, n, tdi2):
     (
         ysrl_123,
         ysrl_213,
         ysrl_132,
         ysrl_312,
         ysrl_231,
-        ysrl_321,
-        L12,
-        L23,
-        L13,
-    ) = build_ysrl(f, k, n, p, P_lm)
+        ysrl_321
+    ) = build_ysrl(f, k, n, p, Ls, P_lm)
+
+    L12 = Ls[0]
+    L23 = Ls[1]
+    L13 = Ls[2]
 
     x1 = 2j * pi * f * L12 / clight
     x2 = 2j * pi * f * L23 / clight
@@ -282,8 +280,8 @@ def get_XYZ_TFs(f, P_lm, k, p, n, tdi2):
 
 
 @njit
-def get_AET_TFs(f, P_lm, k, p, n, tdi2):
-    X, Y, Z = get_XYZ_TFs(f, P_lm, k, p, n, tdi2)
+def get_AET_TFs(f, P_lm, k, p, Ls, n, tdi2):
+    X, Y, Z = get_XYZ_TFs(f, P_lm, k, p, Ls, n, tdi2)
 
     A = (Z - X) / 2.0**0.5
     E = (X - 2.0 * Y + Z) / 6.0**0.5
