@@ -189,7 +189,6 @@ class AnalyticTimeFrequencyWaveform:
         else:
             self.waveform_kernel_cpu(*args)
 
-    @property
     def statistic_kernel(self, n_sources, *args):
         """Active statistic kernel for the selected backend."""
         if self.backend.uses_gpu:
@@ -198,13 +197,13 @@ class AnalyticTimeFrequencyWaveform:
         else:
             self.statistic_kernel_cpu(*args)
 
-    @property
-    def semi_coherent_statistic_sum_kernel(self):
+    def semi_coherent_statistic_sum_kernel(self, n_sources, *args):
         """Active semi-coherent statistic sum kernel for the selected backend."""
         if self.backend.uses_gpu:
-            return semi_coherent_statistic_sum_gpu_wrap
+            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            semi_coherent_statistic_sum_gpu_wrap[bpg, THREADS_PER_BLOCK](*args)
         else:
-            return semi_coherent_statistic_sum_cpu_wrap
+            semi_coherent_statistic_sum_cpu_wrap(*args)
 
     def _load_parameters(
         self, parameters: dict | np.ndarray
@@ -410,6 +409,7 @@ class AnalyticTimeFrequencyWaveform:
                 search_statistic = xp.zeros(n_sources, dtype=np.float64)
 
                 self.semi_coherent_statistic_sum_kernel(
+                    n_sources,
                     out,  # contains the per-segment statistics (d|h and h|h) for each source.
                     N_seg,
                     segment_end_inds,
