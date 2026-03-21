@@ -62,7 +62,6 @@ class TaylorT3Spin(AnalyticModel):
         parameters[:, 0] *= MTsun  # M
         parameters[:, 3] *= pc / clight  # D
 
-
         M = parameters[:, 0]
 
         # parameters[:, 1] is eta. 

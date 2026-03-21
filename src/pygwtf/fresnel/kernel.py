@@ -1,7 +1,7 @@
 from typing import Callable
 
 import numpy as np
-from numba import cuda, jit
+from numba import cuda, jit, njit
 
 from ..response.transfer import fill_k, fill_P_lm
 from ..utils import complex_inner_product
@@ -216,3 +216,75 @@ def analytic_kernel_constructor(
             )
 
     return kernel_cpu, kernel_gpu
+
+@jit
+def semi_coherent_statistic_sum(src_num,
+    statistics,
+    N_seg,
+    segment_end_inds,
+    segment_start_inds,
+    ):
+    """
+    Sum the per-segment statistics to get the semi-coherent statistic (upsilon).
+
+    Args:
+        src_num (int): Index of the source for which to compute the statistic.
+        statistics (array): Array of shape (n_sources, n_time_bins, 2) containing the per-segment statistics (d|h and h|h).
+        N_seg (int): Number of segments that were summed over to get each per-segment statistic.
+        segment_end_inds (array): Array of shape (n_sources,) containing the end indices of the segments for each source.
+        segment_start_inds (array): Array of shape (n_sources,) containing the start indices of the segments for each source.
+
+    Returns:
+        statistic: Array of shape (n_sources,) containing the semi-coherent statistic for each source.
+    """
+
+    # d_h = statistics[src_num, :, 0]
+    # h_h = statistics[src_num, :, 1]
+
+    segment_end = segment_end_inds[src_num]
+    segment_start = segment_start_inds[src_num]
+
+    nT_in_band = segment_end - segment_start + 1 #not sure about this +1, check this.
+    nT_per_seg = int(nT_in_band // N_seg)   
+
+    semicoherent_statistic = 0.0
+
+    for seg_num in range(N_seg):
+        d_h_seg = 0 
+        h_h_seg = 0
+
+        for t_idx in range(nT_per_seg):
+            # Segment start usually zero 
+            t_idx_global = segment_start + seg_num * nT_per_seg + t_idx
+
+            d_h_seg += statistics[src_num, t_idx_global, 0] 
+            h_h_seg += statistics[src_num, t_idx_global, 1]
+
+        semicoherent_statistic += (abs(d_h_seg)**2) / h_h_seg.real
+
+    return(semicoherent_statistic)
+
+@cuda.jit        
+def semi_coherent_statistic_sum_gpu_wrap(statistics,
+    N_seg,
+    segment_end_inds,
+    segment_start_inds,
+    search_statistic):
+
+    src_num = cuda.grid(1)  # one thread for each source
+    # Check if the thread index is within the bounds of the statistic array (checking for edge case where the thread grid might be larger than the number of sources)
+    # If a thread has a index higher than the number of sources, it should not do anything. 
+    if src_num < statistics.shape[0]:
+        search_statistic[src_num] = semi_coherent_statistic_sum(src_num,statistics,N_seg,segment_end_inds,segment_start_inds)
+
+@njit
+def semi_coherent_statistic_sum_cpu_wrap(statistics,
+    N_seg,
+    segment_end_inds,
+    segment_start_inds,
+    search_statistic):
+
+    # For each source 
+    for src_num in range(statistics.shape[0]):
+        search_statistic[src_num] = semi_coherent_statistic_sum(src_num,statistics,N_seg,segment_end_inds,segment_start_inds)
+    

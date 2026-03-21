@@ -7,6 +7,7 @@ from .fresnel.kernel import analytic_kernel_constructor
 from .models.base import AnalyticModel
 from .response.orbits import get_analytic_orbits, get_analytic_ltts
 from .response.transfer import get_AET_TFs
+from .fresnel.kernel import semi_coherent_statistic_sum, semi_coherent_statistic_sum_cpu_wrap, semi_coherent_statistic_sum_gpu_wrap
 
 
 class AnalyticTimeFrequencyWaveform:
@@ -150,6 +151,8 @@ class AnalyticTimeFrequencyWaveform:
             )
         )
 
+
+
         self._param_cache = None
 
         if channels is not None:
@@ -191,6 +194,14 @@ class AnalyticTimeFrequencyWaveform:
             if self.backend.uses_gpu
             else self.statistic_kernel_cpu
         )
+    
+    @property
+    def semi_coherent_statistic_sum_kernel(self):
+        """Active semi-coherent statistic sum kernel for the selected backend."""
+        if self.backend.uses_gpu:
+            return semi_coherent_statistic_sum_gpu_wrap
+        else:
+            return semi_coherent_statistic_sum_cpu_wrap
 
     def _load_parameters(
         self, parameters: dict | np.ndarray
@@ -294,6 +305,7 @@ class AnalyticTimeFrequencyWaveform:
         parameters_response: np.ndarray | None = None,
         out: np.ndarray | None = None,
         compute_statistic: bool = False,
+        N_seg: int | None = None,
     ):
         """Evaluate the analytic waveform or inner-product statistic.
 
@@ -318,6 +330,9 @@ class AnalyticTimeFrequencyWaveform:
             Auto-allocated if ``None``.
         compute_statistic : bool, optional
             Return the inner-product statistics instead of the channels array.
+        N_seg : int, optional
+            If not None, the number of segments to divide the data into for statistic computation.
+            Ignored if ``compute_statistic=False``.
 
         Returns
         -------
@@ -382,7 +397,20 @@ class AnalyticTimeFrequencyWaveform:
                 out,
                 psds,
             )
-        
+
+            if N_seg is not None:
+                search_statistic = xp.zeros(n_sources, dtype=np.float64)
+
+                self.semi_coherent_statistic_sum_kernel(
+                    out, # contains the per-segment statistics (d|h and h|h) for each source.
+                    N_seg,
+                    segment_end_inds,
+                    segment_start_inds,
+                    search_statistic, # contains <d|h> and <h|h> per source per tranche.
+                )
+                # output the semi-coherent statistic instead of the per-segment statistics.
+                out = search_statistic
+                
         # Compute waveforms
         else:
             if out is None:
