@@ -82,9 +82,7 @@ def analytic_kernel_constructor(
             d_h = 0.0 + 0.0j
             h_h = 0.0 + 0.0j
 
-
             if tdi:
-                                
                 # Fill in LTTs for this time step.
                 for i in range(3):
                     Ls[i] = spacecraft_ltts[t_idx, i]
@@ -95,7 +93,6 @@ def analytic_kernel_constructor(
                 transfer_functions = _get_channels(
                     f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
-
 
             for f_rel_idx in range(-kernel_width, kernel_width):
                 f_idx = start_ind + f_rel_idx
@@ -217,13 +214,15 @@ def analytic_kernel_constructor(
 
     return kernel_cpu, kernel_gpu
 
+
 @jit
-def semi_coherent_statistic_sum(src_num,
+def semi_coherent_statistic_sum(
+    src_num,
     statistics,
     N_seg,
     segment_end_inds,
     segment_start_inds,
-    ):
+):
     """
     Sum the per-segment statistics to get the semi-coherent statistic (upsilon).
 
@@ -238,53 +237,51 @@ def semi_coherent_statistic_sum(src_num,
         statistic: Array of shape (n_sources,) containing the semi-coherent statistic for each source.
     """
 
-    # d_h = statistics[src_num, :, 0]
-    # h_h = statistics[src_num, :, 1]
-
     segment_end = segment_end_inds[src_num]
     segment_start = segment_start_inds[src_num]
 
-    nT_in_band = segment_end - segment_start + 1 #not sure about this +1, check this.
-    nT_per_seg = int(nT_in_band // N_seg)   
+    nT_in_band = (
+        segment_end - segment_start + 1
+    )  # not sure about this +1, check this. CCB: I think +1 is right?
+    nT_per_seg = int(nT_in_band // N_seg)
 
     semicoherent_statistic = 0.0
 
     for seg_num in range(N_seg):
-        d_h_seg = 0 
+        d_h_seg = 0
         h_h_seg = 0
 
         for t_idx in range(nT_per_seg):
-            # Segment start usually zero 
+            # Segment start usually zero
             t_idx_global = segment_start + seg_num * nT_per_seg + t_idx
 
-            d_h_seg += statistics[src_num, t_idx_global, 0] 
+            d_h_seg += statistics[src_num, t_idx_global, 0]
             h_h_seg += statistics[src_num, t_idx_global, 1]
 
-        semicoherent_statistic += (abs(d_h_seg)**2) / h_h_seg.real
+        semicoherent_statistic += (abs(d_h_seg) ** 2) / h_h_seg.real
 
-    return(semicoherent_statistic)
+    return semicoherent_statistic
 
-@cuda.jit        
-def semi_coherent_statistic_sum_gpu_wrap(statistics,
-    N_seg,
-    segment_end_inds,
-    segment_start_inds,
-    search_statistic):
 
+@cuda.jit
+def semi_coherent_statistic_sum_gpu_wrap(
+    statistics, N_seg, segment_end_inds, segment_start_inds, search_statistic
+):
     src_num = cuda.grid(1)  # one thread for each source
     # Check if the thread index is within the bounds of the statistic array (checking for edge case where the thread grid might be larger than the number of sources)
-    # If a thread has a index higher than the number of sources, it should not do anything. 
+    # If a thread has a index higher than the number of sources, it should not do anything.
     if src_num < statistics.shape[0]:
-        search_statistic[src_num] = semi_coherent_statistic_sum(src_num,statistics,N_seg,segment_end_inds,segment_start_inds)
+        search_statistic[src_num] = semi_coherent_statistic_sum(
+            src_num, statistics, N_seg, segment_end_inds, segment_start_inds
+        )
+
 
 @njit
-def semi_coherent_statistic_sum_cpu_wrap(statistics,
-    N_seg,
-    segment_end_inds,
-    segment_start_inds,
-    search_statistic):
-
-    # For each source 
+def semi_coherent_statistic_sum_cpu_wrap(
+    statistics, N_seg, segment_end_inds, segment_start_inds, search_statistic
+):
+    # For each source
     for src_num in range(statistics.shape[0]):
-        search_statistic[src_num] = semi_coherent_statistic_sum(src_num,statistics,N_seg,segment_end_inds,segment_start_inds)
-    
+        search_statistic[src_num] = semi_coherent_statistic_sum(
+            src_num, statistics, N_seg, segment_end_inds, segment_start_inds
+        )

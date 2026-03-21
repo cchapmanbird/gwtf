@@ -3,11 +3,16 @@ from typing import Type
 import numpy as np
 
 from .backend import Backend, get_backend
-from .fresnel.kernel import analytic_kernel_constructor
+from .fresnel.kernel import (
+    analytic_kernel_constructor,
+    semi_coherent_statistic_sum_cpu_wrap,
+    semi_coherent_statistic_sum_gpu_wrap,
+)
 from .models.base import AnalyticModel
-from .response.orbits import get_analytic_orbits, get_analytic_ltts
+from .response.orbits import get_analytic_ltts, get_analytic_orbits
 from .response.transfer import get_AET_TFs
-from .fresnel.kernel import semi_coherent_statistic_sum, semi_coherent_statistic_sum_cpu_wrap, semi_coherent_statistic_sum_gpu_wrap
+
+THREADS_PER_BLOCK = 128
 
 
 class AnalyticTimeFrequencyWaveform:
@@ -43,7 +48,7 @@ class AnalyticTimeFrequencyWaveform:
         Pre-computed spacecraft orbits array of shape ``(nT, 3,
         3)``. Required for TDI generation if not supplied at initialisation, in which case analytic orbits will be used.
     spacecraft_ltts: array_like, optional
-        Pre-computed spacecraft light travel times array of shape ``(nT, 3)``. 
+        Pre-computed spacecraft light travel times array of shape ``(nT, 3)``.
         Required for TDI generation if not supplied at initialisation, in which case will be calculated analytically from positions
         (Needdd in metre units)
     """
@@ -69,10 +74,10 @@ class AnalyticTimeFrequencyWaveform:
         assert np.all(
             [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
-        
+
         self.config["dt"] = 1 / (self.config["nF"] * self.config["dF"])
 
-        # Setting up time and frequency grid used by the kernels. 
+        # Setting up time and frequency grid used by the kernels.
         self.t_tranche = (
             self.backend.xp.arange(self.config["nT"]) * self.config["dT"]
         )
@@ -87,13 +92,13 @@ class AnalyticTimeFrequencyWaveform:
         if self.tdi_type is None:
             channel_fn = self.model.get_TT_polarisations_function
             self.n_channels = 2
-            
-            # Fill in dummy orbits for non-TDI generation, as the kernel expects an array of this shape regardless. 
+
+            # Fill in dummy orbits for non-TDI generation, as the kernel expects an array of this shape regardless.
             spacecraft_orbits = self.backend.xp.zeros(
                 (self.config["nT"], 3, 3), dtype=np.float64
             )
         else:
-            # Only TDI-2 now. 
+            # Only TDI-2 now.
             channel_fn = get_AET_TFs
             self.n_channels = 3
             if spacecraft_orbits is None:
@@ -133,7 +138,7 @@ class AnalyticTimeFrequencyWaveform:
             channel_fn,
         )
 
-        # Construct waveform kernels, these are mainly used for debugging. 
+        # Construct waveform kernels, these are mainly used for debugging.
         self.waveform_kernel_cpu, self.waveform_kernel_gpu = (
             analytic_kernel_constructor(  # type: ignore
                 *constructor_args,
@@ -141,7 +146,7 @@ class AnalyticTimeFrequencyWaveform:
                 tdi_type=tdi_type,
             )
         )
-        
+
         # Construct inner-product kernels, these are the kernels used for the statistic evaluation, and to build search statistics/likelhoods.
         self.statistic_kernel_cpu, self.statistic_kernel_gpu = (
             analytic_kernel_constructor(  # type: ignore
@@ -150,8 +155,6 @@ class AnalyticTimeFrequencyWaveform:
                 tdi_type=tdi_type,
             )
         )
-
-
 
         self._param_cache = None
 
@@ -177,24 +180,24 @@ class AnalyticTimeFrequencyWaveform:
 
         self.psds = psds
 
-    @property
-    def waveform_kernel(self):
-        """Active waveform kernel for the selected backend."""
-        return (
-            self.waveform_kernel_gpu
-            if self.backend.uses_gpu
-            else self.waveform_kernel_cpu
-        )
+    def waveform_kernel(self, n_sources, *args):
+        # TODO: this feels clunky. Maybe we need a thin Python class for each prescription that handles kernel dispatch?
+        """Call waveform kernel for the selected backend."""
+        if self.backend.uses_gpu:
+            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            self.waveform_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
+        else:
+            self.waveform_kernel_cpu(*args)
 
     @property
-    def statistic_kernel(self):
+    def statistic_kernel(self, n_sources, *args):
         """Active statistic kernel for the selected backend."""
-        return (
-            self.statistic_kernel_gpu
-            if self.backend.uses_gpu
-            else self.statistic_kernel_cpu
-        )
-    
+        if self.backend_uses_gpu:
+            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            self.statistic_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
+        else:
+            self.statistic_kernel_cpu(*args)
+
     @property
     def semi_coherent_statistic_sum_kernel(self):
         """Active semi-coherent statistic sum kernel for the selected backend."""
@@ -242,7 +245,7 @@ class AnalyticTimeFrequencyWaveform:
         else:
             if parameters.ndim == 1:
                 single_source = True
-            raw = xp.atleast_2d(xp.asarray(parameters,dtype=np.float64))
+            raw = xp.atleast_2d(xp.asarray(parameters, dtype=np.float64))
 
         n_sources = raw.shape[0]
 
@@ -271,7 +274,7 @@ class AnalyticTimeFrequencyWaveform:
 
         # Fill in segment start and end indices based on the model's time bounds for the given parameters and frequency band. If no bounds are returned, default to the full segment.
         bounds = self.model.get_time_bounds(parameters_cache, frequency_band)
-    
+
         if bounds is None:
             segment_start_inds = xp.zeros(
                 parameters_cache.shape[0], dtype=np.int64
@@ -383,10 +386,11 @@ class AnalyticTimeFrequencyWaveform:
                     (n_sources, 4), dtype=np.float64
                 )
             if out is None:
-                # Allocate output array for statistic, shape (n_sources, nT, 2) for h_plus, h_cross. 
+                # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
                 out = xp.zeros((n_sources, nT, 2), dtype=np.complex128)
 
             self.statistic_kernel(
+                n_sources,
                 channels,
                 segment_start_inds,
                 segment_end_inds,
@@ -399,18 +403,22 @@ class AnalyticTimeFrequencyWaveform:
             )
 
             if N_seg is not None:
+                self.inner_product_array = (
+                    out  # cache inner product array for later use
+                )
+
                 search_statistic = xp.zeros(n_sources, dtype=np.float64)
 
                 self.semi_coherent_statistic_sum_kernel(
-                    out, # contains the per-segment statistics (d|h and h|h) for each source.
+                    out,  # contains the per-segment statistics (d|h and h|h) for each source.
                     N_seg,
                     segment_end_inds,
                     segment_start_inds,
-                    search_statistic, # contains <d|h> and <h|h> per source per tranche.
+                    search_statistic,  # contains <d|h> and <h|h> per source per tranche.
                 )
                 # output the semi-coherent statistic instead of the per-segment statistics.
                 out = search_statistic
-                
+
         # Compute waveforms
         else:
             if out is None:
@@ -418,6 +426,7 @@ class AnalyticTimeFrequencyWaveform:
                     (n_sources, nT, nF, self.n_channels), dtype=np.complex128
                 )
             self.waveform_kernel(
+                n_sources,
                 out,
                 segment_start_inds,
                 segment_end_inds,
