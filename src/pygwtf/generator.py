@@ -192,7 +192,7 @@ class AnalyticTimeFrequencyWaveform:
     @property
     def statistic_kernel(self, n_sources, *args):
         """Active statistic kernel for the selected backend."""
-        if self.backend_uses_gpu:
+        if self.backend.uses_gpu:
             bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
             self.statistic_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
         else:
