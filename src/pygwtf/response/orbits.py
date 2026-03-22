@@ -2,7 +2,7 @@ import numpy as np
 import scipy
 from astropy.coordinates import BarycentricMeanEcliptic, SkyCoord
 
-from ..constants import R, f_m, clight
+from ..constants import R, f_m
 
 def Orbit(
     t, initial_ecliptic_longitude, e, n, initial_orientation_of_constellation=0
@@ -234,21 +234,25 @@ def generate_mojito_orbit_splines_resample(mojito_orbit_filepath: str,
 
 def get_analytic_ltts(spacecraft_orbits):
     """
-    Get the analytic light travel times for each link as a function of time, given the spacecraft orbits.
-    This is used for TDI generation.
+    Get analytic link lengths for each arm from spacecraft positions.
+
+    Despite the historical function name, the transfer-function code expects
+    arm lengths in meters, not light-travel times in seconds.
 
     Args:
         spacecraft_orbits (numpy.array): Array of shape (nT, 3, 3) containing the positions of the 3 spacecraft as a function of time.
 
     Returns:
-        ltts (numpy.array): Array of shape (nT, 3) containing the LTTs for the 3 links (12, 23, 31) as a function of time.
+        ltts (numpy.array): Array of shape (nT, 3) containing the link
+            lengths in meters for links (12, 23, 31) as a function of time.
     """
     sc1 = spacecraft_orbits[:, 0, :]
     sc2 = spacecraft_orbits[:, 1, :]
     sc3 = spacecraft_orbits[:, 2, :]
 
-    L12 = np.linalg.norm(sc1 - sc2, axis=1)/clight
-    L23 = np.linalg.norm(sc2 - sc3, axis=1)/clight
-    L31 = np.linalg.norm(sc3 - sc1, axis=1)/clight
+    L12 = np.linalg.norm(sc1 - sc2, axis=1)
+    L23 = np.linalg.norm(sc2 - sc3, axis=1)
+    L31 = np.linalg.norm(sc3 - sc1, axis=1)
+
 
     return np.array([L12, L23, L31]).T
