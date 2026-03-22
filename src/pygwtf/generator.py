@@ -50,7 +50,7 @@ class AnalyticTimeFrequencyWaveform:
     spacecraft_ltts: array_like, optional
         Pre-computed spacecraft light travel times array of shape ``(nT, 3)``.
         Required for TDI generation if not supplied at initialisation, in which case will be calculated analytically from positions
-        (Needdd in metre units)
+        (Need in metre units not seconds)
     """
 
     def __init__(

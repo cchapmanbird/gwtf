@@ -251,4 +251,4 @@ def get_analytic_ltts(spacecraft_orbits):
     L23 = np.linalg.norm(sc2 - sc3, axis=1)/clight
     L31 = np.linalg.norm(sc3 - sc1, axis=1)/clight
 
-    return L12, L23, L31
+    return np.array([L12, L23, L31]).T
