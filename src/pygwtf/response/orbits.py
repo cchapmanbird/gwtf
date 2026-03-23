@@ -229,6 +229,8 @@ def generate_mojito_orbit_splines_resample(mojito_orbit_filepath: str,
 
     LTTs_fine = cubic_temp_interpolant_LTTs(SFT_midpoint_times)
 
+    # Delete fine points and interpolants to save memory, we only need the evaluated points on the SFT grid for the rest of the code.
+    del cubic_temp_interpolant, cubic_temp_interpolant_LTTs, sc1, sc2, sc3, L12, L23, L31 
 
     return p_fine, LTTs_fine
 
