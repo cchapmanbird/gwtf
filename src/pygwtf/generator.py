@@ -184,6 +184,9 @@ class AnalyticTimeFrequencyWaveform:
         # TODO: this feels clunky. Maybe we need a thin Python class for each prescription that handles kernel dispatch?
         """Call waveform kernel for the selected backend."""
         if self.backend.uses_gpu:
+            ## bpg: Blocks per grid 
+            ## Effectively ceil(n_sources / THREADS_PER_BLOCK) but written without needing to import math.ceil.
+            # Ensures we have enough blocks to cover all sources, even if n_sources is not a multiple of THREADS_PER_BLOCK.
             bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
             self.waveform_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
         else:

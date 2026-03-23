@@ -13,6 +13,7 @@ from .common import (
     _get_time_to_f_cpu_wrap,
     _get_time_to_f_gpu_wrap,
 )
+THREADS_PER_BLOCK = 128
 
 
 def etaM_to_m1m2(eta, M):
@@ -78,7 +79,11 @@ class TaylorT3Spin(AnalyticModel):
         
         # 8th index is t_coal, filled inplace. 
         if self.backend.uses_gpu:
-            _get_time_to_coalescence_gpu_wrap(parameters[:, 8], parameters)
+            # Calculate the number of blocks needed to cover all sources, given the number of threads per block.
+            # Since this is a GPU kernel this wrapper is needed. 
+            n_sources = parameters.shape[0]
+            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            _get_time_to_coalescence_gpu_wrap[bpg, THREADS_PER_BLOCK](parameters[:, 8], parameters)
         else:
             _get_time_to_coalescence_cpu_wrap(parameters[:, 8], parameters)
 
@@ -107,8 +112,10 @@ class TaylorT3Spin(AnalyticModel):
         t_end = self.backend.xp.zeros_like(t_coal)
 
         # T-end is just the time when the source leaves the band. 
-        if self.backend.uses_gpu:
-            _get_time_to_f_gpu_wrap(
+        if self.backend.uses_gpu: 
+            n_sources = parameters.shape[0]
+            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            _get_time_to_f_gpu_wrap[bpg, THREADS_PER_BLOCK](
                 t_end, frequency_band[1], t_coal, parameters
             )
         else:
