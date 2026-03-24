@@ -1,13 +1,13 @@
+from numba import cuda 
 from typing import Type
 
 import numpy as np
 
 from .backend import Backend, get_backend
-from .fresnel.kernel import (
-    analytic_kernel_constructor,
-    semi_coherent_statistic_sum_cpu_wrap,
-    semi_coherent_statistic_sum_gpu_wrap,
-)
+
+from .fresnel.kernel import analytic_kernel_constructor
+from .fresnel.search_kernels import analytic_kernel_constructor_semi_coherent
+
 from .models.base import AnalyticModel
 from .response.orbits import get_analytic_ltts, get_analytic_orbits
 from .response.transfer import get_AET_TFs
@@ -156,6 +156,12 @@ class AnalyticTimeFrequencyWaveform:
             )
         )
 
+        # Construct direct semi-coherent statistic kernels that write one value per source.
+        (
+            self.semi_coherent_statistic_kernel_cpu,
+            self.semi_coherent_statistic_kernel_gpu,
+        ) = analytic_kernel_constructor_semi_coherent(*constructor_args)  # type: ignore
+
         self._param_cache = None
 
         if channels is not None:
@@ -187,7 +193,7 @@ class AnalyticTimeFrequencyWaveform:
             ## bpg: Blocks per grid 
             ## Effectively ceil(n_sources / THREADS_PER_BLOCK) but written without needing to import math.ceil.
             # Ensures we have enough blocks to cover all sources, even if n_sources is not a multiple of THREADS_PER_BLOCK.
-            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
             self.waveform_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
         else:
             self.waveform_kernel_cpu(*args)
@@ -195,18 +201,20 @@ class AnalyticTimeFrequencyWaveform:
     def statistic_kernel(self, n_sources, *args):
         """Active statistic kernel for the selected backend."""
         if self.backend.uses_gpu:
-            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
             self.statistic_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
         else:
             self.statistic_kernel_cpu(*args)
 
-    def semi_coherent_statistic_sum_kernel(self, n_sources, *args):
-        """Active semi-coherent statistic sum kernel for the selected backend."""
+    def semi_coherent_statistic_kernel(self, n_sources, *args):
+        """Active direct semi-coherent statistic kernel for the selected backend."""
         if self.backend.uses_gpu:
-            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
-            semi_coherent_statistic_sum_gpu_wrap[bpg, THREADS_PER_BLOCK](*args)
+            bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
+            self.semi_coherent_statistic_kernel_gpu[bpg, THREADS_PER_BLOCK](
+                *args
+            )
         else:
-            semi_coherent_statistic_sum_cpu_wrap(*args)
+            self.semi_coherent_statistic_kernel_cpu(*args)
 
     def _load_parameters(
         self, parameters: dict | np.ndarray
@@ -310,7 +318,9 @@ class AnalyticTimeFrequencyWaveform:
         parameters_response: np.ndarray | None = None,
         out: np.ndarray | None = None,
         compute_statistic: bool = False,
+        search_statistic: np.ndarray | None = None,
         N_seg: int | None = None,
+
     ):
         """Evaluate the analytic waveform or inner-product statistic.
 
@@ -335,6 +345,9 @@ class AnalyticTimeFrequencyWaveform:
             Auto-allocated if ``None``.
         compute_statistic : bool, optional
             Return the inner-product statistics instead of the channels array.
+            NOTE: Not search statistic values but the per-segment d_h and h_h values. If ``True``, requires PSDs and channels to be supplied either at call time or initialisation.
+        search_statistic : ndarray or None
+            If not None, the output array to store the final semi-coherent search statistic (upsilon) after summing over segments. Must be of shape (n_sources,). Ignored if ``N_seg`` is None.
         N_seg : int, optional
             If not None, the number of segments to divide the data into for statistic computation.
             Ignored if ``compute_statistic=False``.
@@ -387,39 +400,50 @@ class AnalyticTimeFrequencyWaveform:
                 parameters_response = xp.zeros(
                     (n_sources, 4), dtype=np.float64
                 )
-            if out is None:
-                # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
-                out = xp.zeros((n_sources, nT, 2), dtype=np.complex128)
 
-            self.statistic_kernel(
-                n_sources,
-                channels,
-                segment_start_inds,
-                segment_end_inds,
-                params,
-                parameters_response,
-                self.spacecraft_orbits,
-                self.spacecraft_ltts,
-                out,
-                psds,
-            )
+            # Not search statistic
+            if N_seg is None:
+                # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2). If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).
+                if out is None:
+                    # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
+                    # This array will be filled in by the kernel 
+                    out = xp.zeros((n_sources, nT, 2), dtype=np.complex128)
+                else:
+                    # If output array is supplied, zero it as a safety measure to ensure no uninitialised values are used.
+                    out.fill(0.0)
 
-            if N_seg is not None:
-                self.inner_product_array = (
-                    out  # cache inner product array for later use
-                )
-
-                search_statistic = xp.zeros(n_sources, dtype=np.float64)
-
-                self.semi_coherent_statistic_sum_kernel(
+                self.statistic_kernel(
                     n_sources,
-                    out,  # contains the per-segment statistics (d|h and h|h) for each source.
-                    N_seg,
-                    segment_end_inds,
+                    channels,
                     segment_start_inds,
-                    search_statistic,  # contains <d|h> and <h|h> per source per tranche.
+                    segment_end_inds,
+                    params,
+                    parameters_response,
+                    self.spacecraft_orbits,
+                    self.spacecraft_ltts,
+                    out,
+                    psds,
                 )
-                # output the semi-coherent statistic instead of the per-segment statistics.
+            # Search 
+            else:
+                # If search_statistic output array is not supplied, allocate an array to store the final semi-coherent search statistic (upsilon) with shape (n_sources,).
+                if search_statistic is None:
+                    search_statistic = xp.zeros(n_sources, dtype=np.float64)
+
+                self.semi_coherent_statistic_kernel(
+                    n_sources,
+                    channels,
+                    segment_start_inds,
+                    segment_end_inds,
+                    params,
+                    parameters_response,
+                    self.spacecraft_orbits,
+                    self.spacecraft_ltts,
+                    search_statistic,
+                    psds,
+                    N_seg,
+                )
+                # Output is search statistic in this case. 
                 out = search_statistic
 
         # Compute waveforms

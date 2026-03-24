@@ -1,11 +1,11 @@
 from math import log, pi, sqrt
 
-from numba import cuda, jit
+from numba import cuda, jit, njit
 
 from ...constants import gamma_e
 
 
-@jit
+@njit
 def phase(x, sigma, delta, eta, s):
     """'
     3.5PN in aligned spin effects. Circular.
@@ -117,7 +117,7 @@ def phase(x, sigma, delta, eta, s):
     return Phi_0_minus_phi
 
 
-@jit
+@njit
 def frequency(tau, sigma, delta, eta, s):
     """
     3.5PN in aligned spin effects. Circular.
@@ -192,7 +192,7 @@ def frequency(tau, sigma, delta, eta, s):
     return F
 
 
-@jit
+@njit
 def frequency_derivative(tau, sigma, delta, eta, s):
     """'
     Differentiated form of frequency above.
@@ -276,7 +276,7 @@ def frequency_derivative(tau, sigma, delta, eta, s):
     return dFdt
 
 
-@jit
+@njit
 def time_to_merger(x, sigma, delta, eta, s):
     """
     Series inverstion of x(tau) (used for frequency) to get t(x) in the form (NOTE: not tau, t):
@@ -355,7 +355,7 @@ def time_to_merger(x, sigma, delta, eta, s):
     return tc
 
 
-@jit
+@njit
 def tau_to_x(tau, sigma, delta, eta, s):
     """
     Directly using x(tau) used for the frequency function
@@ -457,18 +457,17 @@ def tau_to_x(tau, sigma, delta, eta, s):
     return x
 
 
-@jit
+@njit
 def _get_amplitude(t, f, fdot, parameters):
     M = parameters[0]
     eta = parameters[1]
     D = parameters[3]
     v = (pi * M * f) ** (1 / 3)
-    D = parameters[3]
     A = 2 * eta * M / D * (v) ** 2
     return A
 
 
-@jit
+@njit
 def _get_hplus_hcross(hlm, parameters):
     cosi = parameters[2]
     hplus = -hlm * (1 + cosi**2)
@@ -476,14 +475,14 @@ def _get_hplus_hcross(hlm, parameters):
     return hplus, hcross
 
 
-@jit
+@njit
 def _get_time_to_coalescence(M, eta, f0, delta, sigma, s):
     x0 = (pi * M * f0) ** (2 / 3)
     tc = time_to_merger(x0, sigma, delta, eta, s) * M
     return tc
 
 
-@jit
+@njit
 def _get_time_to_coalescence_cpu_wrap(t_coal, parameters):
     for i in range(len(t_coal)):
         t_coal[i] = _get_time_to_coalescence(
@@ -509,14 +508,14 @@ def _get_time_to_coalescence_gpu_wrap(t_coal, parameters):
         )
 
 
-@jit
+@njit
 def _get_time_to_f(f, tc, M, eta, delta, sigma, s):
     x = (pi * M * f) ** (2 / 3)
     tc_from_f = time_to_merger(x, sigma, delta, eta, s) * M
     return tc - tc_from_f
 
 
-@jit
+@njit
 def _get_time_to_f_cpu_wrap(t_from_f, f, tc, parameters):
     for i in range(len(t_from_f)):
         t_from_f[i] = _get_time_to_f(
@@ -545,7 +544,7 @@ def _get_time_to_f_gpu_wrap(t_to_f, f, tc, parameters):
         )
 
 
-@jit
+@njit
 def _get_phi_f_fdot(t, parameters):
     M = parameters[0]
     eta = parameters[1]
