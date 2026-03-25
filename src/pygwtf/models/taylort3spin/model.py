@@ -82,7 +82,7 @@ class TaylorT3Spin(AnalyticModel):
             # Calculate the number of blocks needed to cover all sources, given the number of threads per block.
             # Since this is a GPU kernel this wrapper is needed. 
             n_sources = parameters.shape[0]
-            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            bpg = (n_sources + (THREADS_PER_BLOCK - 1))// THREADS_PER_BLOCK
             _get_time_to_coalescence_gpu_wrap[bpg, THREADS_PER_BLOCK](parameters[:, 8], parameters)
         else:
             _get_time_to_coalescence_cpu_wrap(parameters[:, 8], parameters)
@@ -114,7 +114,7 @@ class TaylorT3Spin(AnalyticModel):
         # T-end is just the time when the source leaves the band. 
         if self.backend.uses_gpu: 
             n_sources = parameters.shape[0]
-            bpg = n_sources + (THREADS_PER_BLOCK - 1) // THREADS_PER_BLOCK
+            bpg = (n_sources + (THREADS_PER_BLOCK - 1))// THREADS_PER_BLOCK
             _get_time_to_f_gpu_wrap[bpg, THREADS_PER_BLOCK](
                 t_end, frequency_band[1], t_coal, parameters
             )

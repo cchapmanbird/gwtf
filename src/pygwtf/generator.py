@@ -105,8 +105,9 @@ class AnalyticTimeFrequencyWaveform:
                 print(
                     "Spacecraft orbits not supplied. Falling back to analytic orbits"
                 )
-                spacecraft_orbits = get_analytic_orbits(self.t_tranche)
+                spacecraft_orbits = self.backend.xp.asarray(get_analytic_orbits(self.t_tranche))
             else:
+                spacecraft_orbits = self.backend.xp.asarray(spacecraft_orbits)
                 assert spacecraft_orbits.shape == (self.config["nT"], 3, 3), (
                     f"Spacecraft orbits array must have shape {(self.config['nT'], 3, 3)}"
                 )
@@ -117,8 +118,9 @@ class AnalyticTimeFrequencyWaveform:
             print(
                 "Spacecraft light travel times not supplied. Falling back to analytic calculation"
             )
-            spacecraft_ltts = get_analytic_ltts(self.spacecraft_orbits)
+            spacecraft_ltts = self.backend.xp.asarray(get_analytic_ltts(self.spacecraft_orbits))
         else:
+            spacecraft_ltts = self.backend.xp.asarray(spacecraft_ltts)
             assert spacecraft_ltts.shape == (self.config["nT"], 3), (
                 f"Spacecraft light travel times array must have shape {(self.config['nT'], 3)}"
             )
