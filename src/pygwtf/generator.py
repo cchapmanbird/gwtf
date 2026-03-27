@@ -1,13 +1,10 @@
-from numba import cuda 
 from typing import Type
 
 import numpy as np
 
 from .backend import Backend, get_backend
-
 from .fresnel.kernel import analytic_kernel_constructor
 from .fresnel.search_kernels import analytic_kernel_constructor_semi_coherent
-
 from .models.base import AnalyticModel
 from .response.orbits import get_analytic_ltts, get_analytic_orbits
 from .response.transfer import get_AET_TFs
@@ -105,7 +102,9 @@ class AnalyticTimeFrequencyWaveform:
                 print(
                     "Spacecraft orbits not supplied. Falling back to analytic orbits"
                 )
-                spacecraft_orbits = self.backend.xp.asarray(get_analytic_orbits(self.t_tranche))
+                spacecraft_orbits = self.backend.xp.asarray(
+                    get_analytic_orbits(self.t_tranche)
+                )
             else:
                 spacecraft_orbits = self.backend.xp.asarray(spacecraft_orbits)
                 assert spacecraft_orbits.shape == (self.config["nT"], 3, 3), (
@@ -118,7 +117,9 @@ class AnalyticTimeFrequencyWaveform:
             print(
                 "Spacecraft light travel times not supplied. Falling back to analytic calculation"
             )
-            spacecraft_ltts = self.backend.xp.asarray(get_analytic_ltts(self.spacecraft_orbits))
+            spacecraft_ltts = self.backend.xp.asarray(
+                get_analytic_ltts(self.spacecraft_orbits)
+            )
         else:
             spacecraft_ltts = self.backend.xp.asarray(spacecraft_ltts)
             assert spacecraft_ltts.shape == (self.config["nT"], 3), (
@@ -192,7 +193,7 @@ class AnalyticTimeFrequencyWaveform:
         # TODO: this feels clunky. Maybe we need a thin Python class for each prescription that handles kernel dispatch?
         """Call waveform kernel for the selected backend."""
         if self.backend.uses_gpu:
-            ## bpg: Blocks per grid 
+            ## bpg: Blocks per grid
             ## Effectively ceil(n_sources / THREADS_PER_BLOCK) but written without needing to import math.ceil.
             # Ensures we have enough blocks to cover all sources, even if n_sources is not a multiple of THREADS_PER_BLOCK.
             bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
@@ -322,7 +323,7 @@ class AnalyticTimeFrequencyWaveform:
         compute_statistic: bool = False,
         search_statistic: np.ndarray | None = None,
         N_seg: int | None = None,
-
+        mixed_precision: bool = False,
     ):
         """Evaluate the analytic waveform or inner-product statistic.
 
@@ -353,7 +354,11 @@ class AnalyticTimeFrequencyWaveform:
         N_seg : int, optional
             If not None, the number of segments to divide the data into for statistic computation.
             Ignored if ``compute_statistic=False``.
-
+        mixed_precision : bool, optional
+            If True, compute the statistic in mixed precision. The precision of the inputs is maintanied to compute
+            waveform-level quantities (such as phase, frequency, amplitude), but single precision is used to construct
+            the time-frequency representation and compute inner products. This can reduce memory usage and increase speed,
+            particularly on GPU, typically with minimal impact on accuracy.
         Returns
         -------
         ndarray
@@ -368,6 +373,7 @@ class AnalyticTimeFrequencyWaveform:
         segment_start_inds, segment_end_inds = self._compute_segment_indices(
             params
         )
+        out_dtype = np.complex64 if mixed_precision else np.complex128
 
         nT = self.config["nT"]
         nF = self.config["nF"]
@@ -408,8 +414,8 @@ class AnalyticTimeFrequencyWaveform:
                 # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2). If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).
                 if out is None:
                     # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
-                    # This array will be filled in by the kernel 
-                    out = xp.zeros((n_sources, nT, 2), dtype=np.complex128)
+                    # This array will be filled in by the kernel
+                    out = xp.zeros((n_sources, nT, 2), dtype=out_dtype)
                 else:
                     # If output array is supplied, zero it as a safety measure to ensure no uninitialised values are used.
                     out.fill(0.0)
@@ -425,12 +431,20 @@ class AnalyticTimeFrequencyWaveform:
                     self.spacecraft_ltts,
                     out,
                     psds,
+                    mixed_precision,
                 )
-            # Search 
+            # Search
             else:
                 # If search_statistic output array is not supplied, allocate an array to store the final semi-coherent search statistic (upsilon) with shape (n_sources,).
                 if search_statistic is None:
-                    search_statistic = xp.zeros(n_sources, dtype=np.float64)
+                    if mixed_precision:
+                        search_statistic = xp.zeros(
+                            n_sources, dtype=np.float32
+                        )
+                    else:
+                        search_statistic = xp.zeros(
+                            n_sources, dtype=np.float64
+                        )
 
                 self.semi_coherent_statistic_kernel(
                     n_sources,
@@ -444,15 +458,16 @@ class AnalyticTimeFrequencyWaveform:
                     search_statistic,
                     psds,
                     N_seg,
+                    mixed_precision,
                 )
-                # Output is search statistic in this case. 
+                # Output is search statistic in this case.
                 out = search_statistic
 
         # Compute waveforms
         else:
             if out is None:
                 out = xp.zeros(
-                    (n_sources, nT, nF, self.n_channels), dtype=np.complex128
+                    (n_sources, nT, nF, self.n_channels), dtype=out_dtype
                 )
             self.waveform_kernel(
                 n_sources,
@@ -463,8 +478,11 @@ class AnalyticTimeFrequencyWaveform:
                 parameters_response,
                 self.spacecraft_orbits,
                 self.spacecraft_ltts,
-                xp.zeros(1, dtype=np.complex128),
-                xp.zeros(1, dtype=np.float64),
+                xp.zeros(1, dtype=out_dtype),
+                xp.zeros(1, dtype=np.float32)
+                if mixed_precision
+                else xp.zeros(1, dtype=np.float64),
+                mixed_precision,
             )
 
         return out[0] if single_source else out

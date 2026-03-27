@@ -1,10 +1,10 @@
 from cmath import exp
 from math import cos, pi, sin, sqrt
 
-from numba import njit
+from numba import jit
 
 
-@njit
+@jit
 def _fresnel(x):
     ax = abs(x)
 
@@ -28,7 +28,7 @@ def _fresnel(x):
         return Sx_approx, Cx_approx
 
 
-@njit
+@jit
 def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T):
     rt2fdot = sqrt(2 * fdot_mode)
 

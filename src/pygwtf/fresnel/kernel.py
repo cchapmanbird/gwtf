@@ -1,7 +1,7 @@
 from typing import Callable
 
 import numpy as np
-from numba import cuda, jit, njit
+from numba import cuda, jit
 
 from ..response.transfer import fill_k, fill_P_lm
 from ..utils import complex_inner_product
@@ -55,9 +55,17 @@ def analytic_kernel_constructor(
         spacecraft_orbits,
         statistic,
         psds,
+        mixed_precision,
     ):
         for i in range(nparams):
             params_source[i] = parameters[src_num, i]
+
+        if mixed_precision:
+            dT_prec = np.float32(dT)
+            dF_prec = np.float32(dF)
+        else:
+            dT_prec = dT
+            dF_prec = dF
 
         if tdi:
             for i in range(4):
@@ -94,18 +102,30 @@ def analytic_kernel_constructor(
                     f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
 
+            if mixed_precision:
+                amp_mode = np.float32(amp_mode)
+                phi0_mode = np.float32(phi0_mode % (2 * np.pi))
+                f0_mode = np.float32(f0_mode)
+                fdot_mode = np.float32(fdot_mode)
+
+                if tdi:
+                    transfer_functions = (
+                        np.complex64(transfer_functions[0]),
+                        np.complex64(transfer_functions[1]),
+                        np.complex64(transfer_functions[2]),
+                    )
+
             for f_rel_idx in range(-kernel_width, kernel_width):
                 f_idx = start_ind + f_rel_idx
                 if f_idx > 0 and f_idx < nF:
-                    f_bin = (f_idx + 1) * (dF)
-
+                    f_bin = (f_idx + 1) * (dF_prec)
                     h_f_pos = _fresnel_kernel(
                         f_bin,
                         amp_mode,
                         phi0_mode,
                         f0_mode,
                         fdot_mode,
-                        dT,
+                        dT_prec,
                     )
 
                     if not tdi:
@@ -120,8 +140,8 @@ def analytic_kernel_constructor(
                         if compute_statistic:
                             d = channels[t_idx, f_idx, i]
                             psd = psds[t_idx, f_idx, i]
-                            d_h += complex_inner_product(d, h, psd, dF)
-                            h_h += complex_inner_product(h, h, psd, dF)
+                            d_h += complex_inner_product(d, h, psd, dF_prec)
+                            h_h += complex_inner_product(h, h, psd, dF_prec)
                         else:
                             channels[src_num, t_idx, f_idx, i] = h
 
@@ -140,6 +160,7 @@ def analytic_kernel_constructor(
         spacecraft_ltts,
         statistic,
         psds,
+        mixed_precision,
     ):
         src_num = (
             cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
@@ -170,6 +191,7 @@ def analytic_kernel_constructor(
                 spacecraft_orbits,
                 statistic,
                 psds,
+                mixed_precision,
             )
 
     @jit
@@ -183,6 +205,7 @@ def analytic_kernel_constructor(
         spacecraft_ltts,
         statistic,
         psds,
+        mixed_precision,
     ):
         for src_num in range(parameters.shape[0]):
             params_source = np.zeros(nparams, dtype=np.float64)
@@ -210,7 +233,7 @@ def analytic_kernel_constructor(
                 spacecraft_orbits,
                 statistic,
                 psds,
+                mixed_precision,
             )
 
     return kernel_cpu, kernel_gpu
-
