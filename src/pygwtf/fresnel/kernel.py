@@ -166,13 +166,15 @@ def analytic_kernel_constructor(
             cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
         )  # one source per thread
         if src_num < parameters.shape[0]:
-            params_source = cuda.local.array(nparams, dtype=np.float64)
+            params_source = cuda.local.array(nparams, dtype=parameters.dtype)
             P_lm = cuda.local.array((3, 3), dtype=np.complex128)
-            k = cuda.local.array((3,), dtype=np.float64)
-            n = cuda.local.array((3, 3), dtype=np.float64)
-            p = cuda.local.array((3, 3), dtype=np.float64)
-            Ls = cuda.local.array((3,), dtype=np.float64)
-            params_source_response = cuda.local.array(4, dtype=np.float64)
+            k = cuda.local.array((3,), dtype=parameters_response.dtype)
+            n = cuda.local.array((3, 3), dtype=parameters_response.dtype)
+            p = cuda.local.array((3, 3), dtype=spacecraft_orbits.dtype)
+            Ls = cuda.local.array((3,), dtype=spacecraft_ltts.dtype)
+            params_source_response = cuda.local.array(
+                4, dtype=parameters_response.dtype
+            )
             kernel_inner(
                 src_num,
                 channels,
@@ -208,13 +210,15 @@ def analytic_kernel_constructor(
         mixed_precision,
     ):
         for src_num in range(parameters.shape[0]):
-            params_source = np.zeros(nparams, dtype=np.float64)
+            params_source = np.zeros(nparams, dtype=parameters.dtype)
             P_lm = np.zeros((3, 3), dtype=np.complex128)
-            k = np.zeros((3,), dtype=np.float64)
-            n = np.zeros((3, 3), dtype=np.float64)
-            p = np.zeros((3, 3), dtype=np.float64)
-            Ls = np.zeros((3,), dtype=np.float64)
-            params_source_response = np.zeros(4, dtype=np.float64)
+            k = np.zeros((3,), dtype=parameters_response.dtype)
+            n = np.zeros((3, 3), dtype=parameters_response.dtype)
+            p = np.zeros((3, 3), dtype=spacecraft_orbits.dtype)
+            Ls = np.zeros((3,), dtype=spacecraft_ltts.dtype)
+            params_source_response = np.zeros(
+                4, dtype=parameters_response.dtype
+            )
             kernel_inner(
                 src_num,
                 channels,

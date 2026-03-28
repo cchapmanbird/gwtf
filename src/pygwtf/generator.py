@@ -67,7 +67,10 @@ class AnalyticTimeFrequencyWaveform:
         )
         self.model = model_class(backend=self.backend)
         self.config = config
-
+        self.config["nT"] = int(self.config["nT"])
+        self.config["nF"] = int(self.config["nF"])
+        self.config["dT"] = float(self.config["dT"])
+        self.config["dF"] = float(self.config["dF"])
         assert np.all(
             [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
@@ -103,7 +106,7 @@ class AnalyticTimeFrequencyWaveform:
                     "Spacecraft orbits not supplied. Falling back to analytic orbits"
                 )
                 spacecraft_orbits = self.backend.xp.asarray(
-                    get_analytic_orbits(self.t_tranche)
+                    get_analytic_orbits(self.backend.asnumpy(self.t_tranche))
                 )
             else:
                 spacecraft_orbits = self.backend.xp.asarray(spacecraft_orbits)
@@ -118,7 +121,7 @@ class AnalyticTimeFrequencyWaveform:
                 "Spacecraft light travel times not supplied. Falling back to analytic calculation"
             )
             spacecraft_ltts = self.backend.xp.asarray(
-                get_analytic_ltts(self.spacecraft_orbits)
+                get_analytic_ltts(self.backend.asnumpy(self.spacecraft_orbits))
             )
         else:
             spacecraft_ltts = self.backend.xp.asarray(spacecraft_ltts)
@@ -220,7 +223,8 @@ class AnalyticTimeFrequencyWaveform:
             self.semi_coherent_statistic_kernel_cpu(*args)
 
     def _load_parameters(
-        self, parameters: dict | np.ndarray
+        self,
+        parameters: dict | np.ndarray,
     ) -> tuple[np.ndarray, bool]:
         """Copy parameters into the internal cache, realloc if source count changes.
 
@@ -246,11 +250,14 @@ class AnalyticTimeFrequencyWaveform:
             except TypeError:
                 single_source = True
 
+            try:
+                dtype = parameters[self.model.parameters[0]].dtype
+            except (KeyError, AttributeError):
+                dtype = np.float64
+
             raw = xp.stack(
                 [
-                    xp.atleast_1d(
-                        xp.asarray(parameters[name], dtype=np.float64)
-                    )
+                    xp.atleast_1d(xp.asarray(parameters[name], dtype=dtype))
                     for name in self.model.parameters
                 ],
                 axis=1,
@@ -258,17 +265,17 @@ class AnalyticTimeFrequencyWaveform:
         else:
             if parameters.ndim == 1:
                 single_source = True
-            raw = xp.atleast_2d(xp.asarray(parameters, dtype=np.float64))
+            dtype = parameters.dtype
+            raw = xp.atleast_2d(xp.asarray(parameters, dtype=dtype))
 
         n_sources = raw.shape[0]
 
         if (
             self._param_cache is None
             or self._param_cache.shape[0] != n_sources
+            or self._param_cache.dtype != dtype
         ):
-            self._param_cache = xp.zeros(
-                (n_sources, n_total), dtype=np.float64
-            )
+            self._param_cache = xp.zeros((n_sources, n_total), dtype=dtype)
 
         # Assign the physical parameters, then compute the derived parameters in-place in the cache.
         self._param_cache[:, :n_phys] = raw
@@ -290,10 +297,10 @@ class AnalyticTimeFrequencyWaveform:
 
         if bounds is None:
             segment_start_inds = xp.zeros(
-                parameters_cache.shape[0], dtype=np.int64
+                parameters_cache.shape[0], dtype=np.int32
             )
             segment_end_inds = xp.full(
-                parameters_cache.shape[0], nT - 1, dtype=np.int64
+                parameters_cache.shape[0], nT - 1, dtype=np.int32
             )
 
         else:
@@ -301,11 +308,11 @@ class AnalyticTimeFrequencyWaveform:
 
             segment_start_inds = xp.floor(
                 xp.asarray(t_start, dtype=np.float64) / dT
-            ).astype(np.int64)
+            ).astype(np.int32)
 
             segment_end_inds = xp.floor(
                 xp.asarray(t_end, dtype=np.float64) / dT
-            ).astype(np.int64)
+            ).astype(np.int32)
 
             segment_start_inds = xp.clip(segment_start_inds, 0, nT - 1)
 

@@ -7,6 +7,7 @@ from ..response.transfer import fill_k, fill_P_lm
 from ..utils import complex_inner_product
 from .common import _fresnel_kernel
 
+
 @jit
 def semi_coherent_statistic_sum(
     src_num,
@@ -41,8 +42,8 @@ def semi_coherent_statistic_sum(
     semicoherent_statistic = 0.0
 
     for seg_num in range(N_seg):
-        d_h_seg = 0.0+0.0j
-        h_h_seg = 0.0+0.0j
+        d_h_seg = 0.0 + 0.0j
+        h_h_seg = 0.0 + 0.0j
 
         for t_idx in range(nT_per_seg):
             # Segment start usually zero
@@ -78,6 +79,7 @@ def semi_coherent_statistic_sum_cpu_wrap(
         search_statistic[src_num] = semi_coherent_statistic_sum(
             src_num, statistics, N_seg, segment_end_inds, segment_start_inds
         )
+
 
 def analytic_kernel_constructor_semi_coherent(
     config: dict,
@@ -139,7 +141,15 @@ def analytic_kernel_constructor_semi_coherent(
         statistic,
         psds,
         Nseg,
+        mixed_precision,
     ):
+        if mixed_precision:
+            dT_prec = np.float32(dT)
+            dF_prec = np.float32(dF)
+        else:
+            dT_prec = dT
+            dF_prec = dF
+
         for i in range(nparams):
             params_source[i] = parameters[src_num, i]
 
@@ -151,32 +161,37 @@ def analytic_kernel_constructor_semi_coherent(
         nT_in_band = (
             segment_end_inds[src_num] - segment_start_inds[src_num] + 1
         )  # not sure about this +1, check this. CCB: I think +1 is right?
-        nT_per_seg = int(nT_in_band // Nseg)
+        nT_per_seg = np.int32(nT_in_band // Nseg)
 
-        semi_coherent_stat = 0 
+        semi_coherent_stat = 0
 
         for seg_num in range(Nseg):
             # Defined within segment
             d_h_seg = 0.0 + 0.0j
             h_h_seg = 0.0 + 0.0j
-        
+
             for t_idx_in_seg in range(nT_per_seg):
                 # Segment start usually zero
-                t_idx = segment_start_inds[src_num] + seg_num * nT_per_seg + t_idx_in_seg
-
-                t_tranche = dT * t_idx
+                t_idx = (
+                    segment_start_inds[src_num]
+                    + seg_num * nT_per_seg
+                    + t_idx_in_seg
+                )
+                t_tranche = dT_prec * t_idx
 
                 phi0_mode, f0_mode, fdot_mode = _get_phi_f_fdot(
                     t_tranche, params_source
                 )
                 amp_mode = (
-                    _get_amplitude(t_tranche, f0_mode, fdot_mode, params_source)
+                    _get_amplitude(
+                        t_tranche, f0_mode, fdot_mode, params_source
+                    )
                     / 2
                 )
 
                 start_ind = int(f0_mode / dF)
 
-                # Defined within tranche 
+                # Defined within tranche
                 d_h = 0.0 + 0.0j
                 h_h = 0.0 + 0.0j
 
@@ -190,11 +205,23 @@ def analytic_kernel_constructor_semi_coherent(
                 transfer_functions = _get_channels(
                     f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
-                 
+
+                if mixed_precision:
+                    amp_mode = np.float32(amp_mode)
+                    phi0_mode = np.float32(phi0_mode % (2 * np.pi))
+                    f0_mode = np.float32(f0_mode)
+                    fdot_mode = np.float32(fdot_mode)
+
+                    transfer_functions = (
+                        np.complex64(transfer_functions[0]),
+                        np.complex64(transfer_functions[1]),
+                        np.complex64(transfer_functions[2]),
+                    )
+
                 for f_rel_idx in range(-kernel_width, kernel_width):
                     f_idx = start_ind + f_rel_idx
                     if f_idx > 0 and f_idx < nF:
-                        f_bin = (f_idx + 1) * (dF)
+                        f_bin = (f_idx + 1) * (dF_prec)
 
                         h_f_pos = _fresnel_kernel(
                             f_bin,
@@ -202,17 +229,17 @@ def analytic_kernel_constructor_semi_coherent(
                             phi0_mode,
                             f0_mode,
                             fdot_mode,
-                            dT,
+                            dT_prec,
                         )
 
                         for i in range(channels.shape[-1]):
                             h = h_f_pos * transfer_functions[i]
 
                             # Extract data and psd for this time-frequency bin and channel, and accumulate the per-tranch statistic.
-                            d = channels[t_idx, f_idx, i]   
+                            d = channels[t_idx, f_idx, i]
                             psd = psds[t_idx, f_idx, i]
-                            d_h += complex_inner_product(d, h, psd, dF)
-                            h_h += complex_inner_product(h, h, psd, dF)
+                            d_h += complex_inner_product(d, h, psd, dF_prec)
+                            h_h += complex_inner_product(h, h, psd, dF_prec)
 
                 # Adding the per-tranch statistics to the per-segment statistic.
                 d_h_seg += d_h
@@ -221,7 +248,6 @@ def analytic_kernel_constructor_semi_coherent(
             semi_coherent_stat += (abs(d_h_seg) ** 2) / h_h_seg.real
 
         statistic[src_num] = semi_coherent_stat
-
 
     @cuda.jit
     def kernel_gpu(
@@ -235,18 +261,21 @@ def analytic_kernel_constructor_semi_coherent(
         statistic,
         psds,
         Nseg,
+        mixed_precision,
     ):
         src_num = (
             cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
         )  # one source per thread
         if src_num < parameters.shape[0]:
-            params_source = cuda.local.array(nparams, dtype=np.float64)
-            P_lm = cuda.local.array((3, 3), dtype=np.complex128)
-            k = cuda.local.array((3,), dtype=np.float64)
-            n = cuda.local.array((3, 3), dtype=np.float64)
-            p = cuda.local.array((3, 3), dtype=np.float64)
-            Ls = cuda.local.array((3,), dtype=np.float64)
-            params_source_response = cuda.local.array(4, dtype=np.float64)
+            params_source = cuda.local.array(nparams, dtype=parameters.dtype)
+            P_lm = cuda.local.array((3, 3), dtype=channels.dtype)
+            k = cuda.local.array((3,), dtype=parameters_response.dtype)
+            n = cuda.local.array((3, 3), dtype=parameters_response.dtype)
+            p = cuda.local.array((3, 3), dtype=spacecraft_orbits.dtype)
+            Ls = cuda.local.array((3,), dtype=spacecraft_ltts.dtype)
+            params_source_response = cuda.local.array(
+                4, dtype=parameters.dtype
+            )
             kernel_inner(
                 src_num,
                 channels,
@@ -266,6 +295,7 @@ def analytic_kernel_constructor_semi_coherent(
                 statistic,
                 psds,
                 Nseg,
+                mixed_precision,
             )
 
     @jit
@@ -280,15 +310,16 @@ def analytic_kernel_constructor_semi_coherent(
         statistic,
         psds,
         Nseg,
+        mixed_precision,
     ):
         for src_num in range(parameters.shape[0]):
-            params_source = np.zeros(nparams, dtype=np.float64)
-            P_lm = np.zeros((3, 3), dtype=np.complex128)
-            k = np.zeros((3,), dtype=np.float64)
-            n = np.zeros((3, 3), dtype=np.float64)
-            p = np.zeros((3, 3), dtype=np.float64)
-            Ls = np.zeros((3,), dtype=np.float64)
-            params_source_response = np.zeros(4, dtype=np.float64)
+            params_source = np.zeros(nparams, dtype=parameters.dtype)
+            P_lm = np.zeros((3, 3), dtype=channels.dtype)
+            k = np.zeros((3,), dtype=parameters_response.dtype)
+            n = np.zeros((3, 3), dtype=parameters_response.dtype)
+            p = np.zeros((3, 3), dtype=spacecraft_orbits.dtype)
+            Ls = np.zeros((3,), dtype=spacecraft_ltts.dtype)
+            params_source_response = np.zeros(4, dtype=parameters.dtype)
             kernel_inner(
                 src_num,
                 channels,
@@ -308,6 +339,7 @@ def analytic_kernel_constructor_semi_coherent(
                 statistic,
                 psds,
                 Nseg,
+                mixed_precision,
             )
 
     return kernel_cpu, kernel_gpu

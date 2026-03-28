@@ -14,6 +14,8 @@ from .common import (
     _get_time_to_f_gpu_wrap,
 )
 
+THREADS_PER_BLOCK = 128
+
 
 class TaylorT2Ecc(AnalyticModel):
     @property
@@ -40,7 +42,11 @@ class TaylorT2Ecc(AnalyticModel):
         parameters[:, 4] *= pc / clight  # D
 
         if self.backend.uses_gpu:
-            _get_time_to_coalescence_gpu_wrap(parameters[:, -1], parameters)
+            n_sources = parameters.shape[0]
+            bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
+            _get_time_to_coalescence_gpu_wrap[bpg, THREADS_PER_BLOCK](
+                parameters[:, -1], parameters
+            )
         else:
             _get_time_to_coalescence_cpu_wrap(parameters[:, -1], parameters)
 
@@ -68,7 +74,9 @@ class TaylorT2Ecc(AnalyticModel):
         t_start = self.backend.xp.zeros_like(t_coal)
         t_end = self.backend.xp.zeros_like(t_coal)
         if self.backend.uses_gpu:
-            _get_time_to_f_gpu_wrap(
+            n_sources = parameters.shape[0]
+            bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
+            _get_time_to_f_gpu_wrap[bpg, THREADS_PER_BLOCK](
                 t_end, frequency_band[1], t_coal, parameters
             )
         else:

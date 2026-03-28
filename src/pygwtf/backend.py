@@ -31,6 +31,12 @@ class Backend(ABC):
         """
         return False
 
+    def asnumpy(self, array: Any) -> np.ndarray:
+        """
+        Converts the given array to a NumPy array. For CPU backend, this can be a no-op. For GPU backend, this will transfer the array from GPU to CPU.
+        """
+        return array
+
 
 class CPUBackend(Backend):
     @property
@@ -50,6 +56,9 @@ class GPUBackend(Backend):
     @property
     def uses_gpu(self) -> bool:
         return True
+
+    def asnumpy(self, array: Any) -> np.ndarray:
+        return cp.asnumpy(array)
 
 
 def get_backend(backend_name: str) -> Backend:
