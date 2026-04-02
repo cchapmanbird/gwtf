@@ -218,7 +218,11 @@ def analytic_kernel_constructor_semi_coherent(
                         np.complex64(transfer_functions[2]),
                     )
 
-                for f_rel_idx in range(-kernel_width, kernel_width):
+                extra_fdot_bins = int((fdot_mode * t_tranche) / dF)
+
+                for f_rel_idx in range(
+                    -kernel_width, kernel_width + extra_fdot_bins + 1
+                ):
                     f_idx = start_ind + f_rel_idx
                     if f_idx > 0 and f_idx < nF:
                         f_bin = (f_idx + 1) * (dF_prec)

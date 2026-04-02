@@ -102,6 +102,8 @@ def analytic_kernel_constructor(
                     f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
 
+            extra_fdot_bins = int((fdot_mode * t_tranche) / dF)
+
             if mixed_precision:
                 amp_mode = np.float32(amp_mode)
                 phi0_mode = np.float32(phi0_mode % (2 * np.pi))
@@ -115,7 +117,9 @@ def analytic_kernel_constructor(
                         np.complex64(transfer_functions[2]),
                     )
 
-            for f_rel_idx in range(-kernel_width, kernel_width):
+            for f_rel_idx in range(
+                -kernel_width, kernel_width + extra_fdot_bins + 1
+            ):
                 f_idx = start_ind + f_rel_idx
                 if f_idx > 0 and f_idx < nF:
                     f_bin = (f_idx + 1) * (dF_prec)
