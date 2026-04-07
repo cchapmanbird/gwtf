@@ -102,7 +102,7 @@ def analytic_kernel_constructor(
                     f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
 
-            extra_fdot_bins = int((fdot_mode * t_tranche) / dF)
+            extra_fdot_bins = int((fdot_mode * dT) / dF)
 
             if mixed_precision:
                 amp_mode = np.float32(amp_mode)
