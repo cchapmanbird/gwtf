@@ -1,15 +1,20 @@
 import numpy as np
 import scipy
 from astropy.coordinates import BarycentricMeanEcliptic, SkyCoord
-
+import h5py
 from ..constants import R, f_m
 
 def Orbit(
-    t, initial_ecliptic_longitude, e, n, initial_orientation_of_constellation=0
-):
+        t: np.ndarray, 
+        initial_ecliptic_longitude: float, 
+        e: float, 
+        n: int, 
+        initial_orientation_of_constellation: float = 0
+    )-> np.ndarray:
     """
     Function to calculate the position of the spacecrafts in the constellation as a function of time.
-    https://arxiv.org/pdf/gr-qc/0311069
+
+    Reference: https://arxiv.org/pdf/gr-qc/0311069
 
     Args:
         t (jax.numpy.array): Time array
@@ -62,39 +67,51 @@ def Orbit(
     return pos
 
 
-def get_analytic_orbits(t_tranche):
-    a = R
-    e0 = 2.5e9 / (2 * np.sqrt(3) * a)
-    kappa = 0  # - 1.7967674211761813 - 20/180*np.pi # GWSPACE INITIAL ECLIPTIC LONGITUDE
+def get_analytic_orbits(t_tranche: np.ndarray)-> np.ndarray:
+    ''''
+    Get analytic orbits for the 3 spacecrafts in the constellation as a function of time.
+    
+    Args: 
+        t_tranche (numpy.array): Time array for the tranche of data being analyzed. Shape (nT,)
 
+    Returns:
+        orbits (numpy.array): Array of shape (nT, 3, 3) containing the positions of the 3 spacecraft as a function of time.
+    '''
+    a = R
+    # Eccentricity of LISA orbit from https://arxiv.org/pdf/gr-qc/0311069
+    e0 = 2.5e+9/ (2 * np.sqrt(3) * a)
+
+    kappa = 0  
     pos_0 = Orbit(
         t_tranche,
         kappa,  # initial ecliptic latitude
         e0,
-        n=0,
+        n=0, # spacecraft number {0,1,2}
     )
     pos_1 = Orbit(t_tranche, kappa, e0, n=1)
     pos_2 = Orbit(t_tranche, kappa, e0, n=2)
+
+    # Transpose used to transform shape to (nT,3,3) for consistency with mojito orbits. 
     return np.array([pos_0, pos_1, pos_2]).transpose(2, 0, 1).copy()
 
 
-def read_in_mojito_orbit(filepath: str):
+def read_in_mojito_orbit(filepath: str)-> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Plugin for reading in Mojito orbit files for LISA spacecraft positions.
     NOTE: Should really be deprecated by the mojito package, but this is a quick and dirty way to get the orbits in for now.
-    NOTE: Should also be reading in and building interpolants on the light-travel-times as thats available too.
     NOTE: This is *not* compatible with the
         additional trim that is needed to get rid of the low frequency noise that comes from the high pass
-        filter of mojito data... But I will deal with that once it causes problems.
-    NOTE: Hardcoded to the 0.4hz data for now.
+        filter of mojito data...
+    NOTE: Hardcoded to the times-shifts needed for the 0.4Hz downsampled data for now.
 
     Args:
         filepath (str): Path to the Mojito orbit file
     Returns:
-        times (numpy.array): Time array
-        positions (list): List of numpy arrays for each spacecraft position
+        pos_sc1 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 1 as a function of time.
+        pos_sc2 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 2 as a function of time.
+        pos_sc3 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 3 as a function of time.
+        orbital_times_shifted (numpy.array): Array of shape (N_times_orbital,) containing the shifted orbital times corresponding to the positions.
     """
-    import h5py
 
     orbit_datafile = h5py.File(filepath, "r")
 
@@ -113,14 +130,12 @@ def read_in_mojito_orbit(filepath: str):
         N_times_orbital
     )  # t0 for this is actually 61171239.327664
 
-    # Trying Sylvains reference times: from https://gitlab.esa.int/lisa-sgs/wav/sobhb/-/blob/main/mojitolight_testing/sobhb_mojitolight_testing.ipynb?ref_type=heads
-
-    # Orbital data is given from
     # Our data collection starts at 97729939.827664 (0.4Hz), this relative to the t0 above is 36558700.5
     # Our data collection ends at 160846189.07766402 (0.4Hz), this relative to the t0 above is 99674949.75000001
 
     data_collection_start = 36558700.5  # This is our new t0 (literally will be zero), relative to the start of the orbital data.
-    data_collection_end = 99674949.75000001  # TBD, need to check this. :(
+    data_collection_end = 99674949.75000001  # This is the end of our data collection, relative to the start of the orbital data.
+
     filter_indices = np.where(
         (orbital_times >= data_collection_start)
         & (orbital_times <= data_collection_end)
@@ -129,6 +144,7 @@ def read_in_mojito_orbit(filepath: str):
     positions = positions[
         filter_indices, :, :
     ]  # Shape (N_times_orbital_filtered,#Spacecraft,#{x,y,z})
+
     orbital_times = orbital_times[
         filter_indices
     ]  # Shape (N_times_orbital_filtered,)
@@ -168,18 +184,23 @@ def read_in_mojito_orbit(filepath: str):
 
     return (pos_sc1, pos_sc2, pos_sc3, orbital_times_shifted)
 
-def read_in_mojito_ltts(filepath: str):
+def read_in_mojito_ltts(filepath: str)-> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     '''
     Read in mojito LTT file. 
     Should really do this in a better way, currently requires a unique LTT file which contains the LTTs for each link (assuming symmetric LTTs for now). 
     Following same time conventions as the orbit file mojito. (Assuming that the LTT times are already subset to the data collection time in preprocessing.)
 
-    Only extracts: {12, 23, 31} links for now, but can extract full set {12, 23, 31, 13, 32, 21}
+    Only extracts: {12, 23, 31} links for now.
+
+    NOTE/WARNING: In seconds not metres, need to be converted to metres to match transfer function conventions!!! 
 
     Args:
         filepath (str): Path to the Mojito LTT file
     Returns:
-        ltts (numpy.array): Array of shape (N_times, 3) containing the LTTs for the 3 links (12, 23, 31) as a function of time.
+         L12 (numpy.array): Array of shape (N_times_LTT,) containing the LTTs for link 12 as a function of time.
+         L23 (numpy.array): Array of shape (N_times_LTT,) containing the LTTs for link 23 as a function of time.
+         L31 (numpy.array): Array of shape (N_times_LTT,) containing the LTTs for link 31 as a function of time.
+         LTT_times_shifted (numpy.array): Array of shape (N_times_LTT,) containing the shifted LTT times corresponding to the LTTs.        
     '''
     ltt_file = np.load(filepath)
 
@@ -189,17 +210,21 @@ def read_in_mojito_ltts(filepath: str):
 
     LTT_times_shifted = ltt_file['ltt_times'] - ltt_file['ltt_times'][0] # Shift to start at zero, same convention as the orbit file.
 
-
     return(L12, L23, L31, LTT_times_shifted)
 
 def generate_mojito_orbit_splines_resample(mojito_orbit_filepath: str, 
                                            mojito_ltt_filepath: str,
-                                           t_sft: np.ndarray):
+                                           t_tranches: np.ndarray)-> tuple[np.ndarray, np.ndarray]:
     """
     Generates orbit splines from a mojito orbit file. Then evaluate them on SFT time grid.
 
-    :param mojito_orbit_filepath: Description
-    :param dt: Description
+    Args:
+        mojito_orbit_filepath (str): Path to the Mojito orbit file
+        mojito_ltt_filepath (str): Path to the Mojito LTT file (assumes npz file)
+        t_tranches (numpy.array): Time array for the SFT midpoints, shape (nT,)
+    Returns:
+        p_fine (numpy.array): Array of shape (nT, 3, 3) containing the positions of the 3 spacecraft as a function of time.
+        LTTs_fine (numpy.array): Array of shape (nT, 3) containing the LTTs for the 3 links (12, 23, 31) as a function of time.
 
     """
     sc1, sc2, sc3, mojito_orbital_times = read_in_mojito_orbit(
@@ -212,21 +237,24 @@ def generate_mojito_orbit_splines_resample(mojito_orbit_filepath: str,
         x=mojito_orbital_times, y=p.T, axis=0, extrapolate=True
     )  # This is a cubic interpolant over the original orbital times.
 
-    # Evaluate the cubic interpolant on the SFT time grid
-    SFT_midpoint_times = (t_sft[1:] + t_sft[:-1]) / 2
-
+    # Evaluate the cubic interpolant on the SFT time grid at midpoint. 
+    SFT_midpoint_times = (t_tranches[1:] + t_tranches[:-1]) / 2
+    
+    # Evaluate the position splines on the SFT midpoint times.
     p_fine = cubic_temp_interpolant(SFT_midpoint_times).T
 
     L12, L23, L31, LTT_times = read_in_mojito_ltts(
         mojito_ltt_filepath
     )
-
+    
     Ls = np.array([L12, L23, L31])
+
 
     cubic_temp_interpolant_LTTs = scipy.interpolate.CubicSpline(
         x=LTT_times, y=Ls.T, axis=0, extrapolate=True
     )  # This is a cubic interpolant over the original orbital times.
 
+    # Evaluate the LTT splines on the SFT midpoint times.
     LTTs_fine = cubic_temp_interpolant_LTTs(SFT_midpoint_times)
 
     # Delete fine points and interpolants to save memory, we only need the evaluated points on the SFT grid for the rest of the code.
@@ -234,7 +262,7 @@ def generate_mojito_orbit_splines_resample(mojito_orbit_filepath: str,
 
     return p_fine, LTTs_fine
 
-def get_analytic_ltts(spacecraft_orbits):
+def get_analytic_ltts(spacecraft_orbits: np.ndarray)-> np.ndarray:
     """
     Get analytic link lengths for each arm from spacecraft positions.
 

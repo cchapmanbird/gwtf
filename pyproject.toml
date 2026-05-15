@@ -16,6 +16,7 @@ dependencies = [
     "numba",
     "lisaconstants",
     "astropy",
+    "h5py",
 ]
 dynamic = [
     "version"

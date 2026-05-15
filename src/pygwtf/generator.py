@@ -9,6 +9,7 @@ from .models.base import AnalyticModel
 from .response.orbits import get_analytic_ltts, get_analytic_orbits
 from .response.transfer import get_AET_TFs
 
+# Number of threads per block for GPU kernels, common choice. 
 THREADS_PER_BLOCK = 128
 
 
@@ -32,11 +33,11 @@ class AnalyticTimeFrequencyWaveform:
         currently supported.
     backend : str or Backend, optional
         Compute backend — ``'cpu'`` (default) or ``'gpu'``.
-    tdi_type : {None, 1, 2}, optional
+    tdi_type : {None, 2}, optional
         TDI generation order.  ``None`` produces TT polarisations.
-        ``1`` produces first-generation TDI, and ``2`` produces second-generation TDI.
+        ``2`` produces second-generation TDI.
     channels : array_like, optional
-        Pre-computed channels array of shape ``(nT, nF, n_channels)
+        Pre-computed data array of shape ``(nT, nF, n_channels)
         ``. Required for statistic evaluation if not supplied at call time.
     psds : array_like, optional
         Pre-computed PSD array of shape ``(nT, nF, n_channels)
@@ -82,11 +83,14 @@ class AnalyticTimeFrequencyWaveform:
             self.backend.xp.arange(self.config["nT"]) * self.config["dT"]
         )
 
+        # Note: includes the f=0 DC bin. 
         self.f_tranche = (
             self.backend.xp.arange(self.config["nF"]) * self.config["dF"]
         )
 
         self.tdi_type = tdi_type
+
+        assert self.tdi_type== 2 or self.tdi_type is None, "Only TDI-2 generation is currently supported. Set tdi_type to 2 or None."
 
         # If TDI type is not specified, do not compute TDI channels, instead go for the h_plus/h_cross polarisations.
         if self.tdi_type is None:
@@ -97,6 +101,8 @@ class AnalyticTimeFrequencyWaveform:
             spacecraft_orbits = self.backend.xp.zeros(
                 (self.config["nT"], 3, 3), dtype=np.float64
             )
+        
+        # TDI case
         else:
             # Only TDI-2 now.
             channel_fn = get_AET_TFs
@@ -116,15 +122,15 @@ class AnalyticTimeFrequencyWaveform:
 
         self.spacecraft_orbits = spacecraft_orbits
 
-        if spacecraft_ltts is None:
+        if spacecraft_ltts is None: # in *metres*
             print(
                 "Spacecraft light travel times not supplied. Falling back to analytic calculation"
             )
             spacecraft_ltts = self.backend.xp.asarray(
-                get_analytic_ltts(self.backend.asnumpy(self.spacecraft_orbits))
+                get_analytic_ltts(self.backend.asnumpy(self.spacecraft_orbits)) # computed in metres
             )
         else:
-            spacecraft_ltts = self.backend.xp.asarray(spacecraft_ltts)
+            spacecraft_ltts = self.backend.xp.asarray(spacecraft_ltts)# in metres
             assert spacecraft_ltts.shape == (self.config["nT"], 3), (
                 f"Spacecraft light travel times array must have shape {(self.config['nT'], 3)}"
             )
