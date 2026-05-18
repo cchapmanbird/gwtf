@@ -150,9 +150,9 @@ class AnalyticTimeFrequencyWaveform:
             channel_fn,
         )
 
-        # Construct waveform kernels, these are mainly used for debugging.
+        # Construct waveform kernels, these are used to return the h_plys/h_cross or TDI channels for given parameters. 
         self.waveform_kernel_cpu, self.waveform_kernel_gpu = (
-            analytic_kernel_constructor(  # type: ignore
+            analytic_kernel_constructor(  
                 *constructor_args,
                 compute_statistic=False,
                 tdi_type=tdi_type,
@@ -160,8 +160,9 @@ class AnalyticTimeFrequencyWaveform:
         )
 
         # Construct inner-product kernels, these are the kernels used for the statistic evaluation, and to build search statistics/likelhoods.
+        # Note that the statistic kernel does not return the waveform and vice-versa. 
         self.statistic_kernel_cpu, self.statistic_kernel_gpu = (
-            analytic_kernel_constructor(  # type: ignore
+            analytic_kernel_constructor(  
                 *constructor_args,
                 compute_statistic=True,
                 tdi_type=tdi_type,
@@ -169,13 +170,15 @@ class AnalyticTimeFrequencyWaveform:
         )
 
         # Construct direct semi-coherent statistic kernels that write one value per source.
+        # 'Special' kernels used to do do the sobbh search. 
         (
             self.semi_coherent_statistic_kernel_cpu,
             self.semi_coherent_statistic_kernel_gpu,
-        ) = analytic_kernel_constructor_semi_coherent(*constructor_args)  # type: ignore
+        ) = analytic_kernel_constructor_semi_coherent(*constructor_args) 
 
         self._param_cache = None
 
+        # Corresponds to the 'data' array against which inner-products are computed. Can be left as None if only waveform generation is desired.
         if channels is not None:
             assert channels.shape == (
                 self.config["nT"],
@@ -187,6 +190,7 @@ class AnalyticTimeFrequencyWaveform:
 
         self.channels = channels
 
+        # Corresponds to the PSD array used for inner-product/statistic computation. Can be left as None if only waveform generation is desired.
         if psds is not None:
             assert psds.shape == (
                 self.config["nT"],
@@ -199,19 +203,41 @@ class AnalyticTimeFrequencyWaveform:
         self.psds = psds
 
     def waveform_kernel(self, n_sources, *args):
-        # TODO: this feels clunky. Maybe we need a thin Python class for each prescription that handles kernel dispatch?
-        """Call waveform kernel for the selected backend."""
+        """Call waveform kernel for the selected backend.
+
+        NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays. 
+        
+        Parameters
+        ----------
+        n_sources : int
+            Number of sources to process, used to determine GPU grid size if applicable.
+        *args : tuple
+            Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing.
+            See the kernel construction functions for details on the expected arguments.
+        """
         if self.backend.uses_gpu:
             ## bpg: Blocks per grid
             ## Effectively ceil(n_sources / THREADS_PER_BLOCK) but written without needing to import math.ceil.
-            # Ensures we have enough blocks to cover all sources, even if n_sources is not a multiple of THREADS_PER_BLOCK.
+            # Ensures we have enough blocks (each with THREADS_PER_BLOCK threads) to cover all sources, even if n_sources is not a multiple of THREADS_PER_BLOCK.
             bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
             self.waveform_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
         else:
             self.waveform_kernel_cpu(*args)
 
     def statistic_kernel(self, n_sources, *args):
-        """Active statistic kernel for the selected backend."""
+        """Active statistic kernel for the selected backend.
+           Only returns the per-segment d_h and h_h values.
+        
+        NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays.
+
+        Parameters
+        ----------
+        n_sources : int
+            Number of sources to process, used to determine GPU grid size if applicable.
+        *args : tuple
+            Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing.
+            See the kernel construction functions for details on the expected arguments.    
+        """
         if self.backend.uses_gpu:
             bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
             self.statistic_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
@@ -219,7 +245,18 @@ class AnalyticTimeFrequencyWaveform:
             self.statistic_kernel_cpu(*args)
 
     def semi_coherent_statistic_kernel(self, n_sources, *args):
-        """Active direct semi-coherent statistic kernel for the selected backend."""
+        """Active direct semi-coherent statistic kernel for the selected backend.
+           Returns the final semi-coherent statistic value per source, after summing over segments internally in the kernel.
+           NOTE: Only really used for the SoBBH search 
+
+        Parameters
+        ----------
+        n_sources : int
+            Number of sources to process, used to determine GPU grid size if applicable.
+        *args : tuple
+            Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing
+            See the kernel construction functions for details on the expected arguments.
+        """
         if self.backend.uses_gpu:
             bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
             self.semi_coherent_statistic_kernel_gpu[bpg, THREADS_PER_BLOCK](
@@ -233,6 +270,7 @@ class AnalyticTimeFrequencyWaveform:
         parameters: dict | np.ndarray,
     ) -> tuple[np.ndarray, bool]:
         """Copy parameters into the internal cache, realloc if source count changes.
+        Internal cache is helpful as filling in an array is cheaper than reallocating array, specially on GPU. 
 
         Parameters
         ----------
@@ -240,7 +278,7 @@ class AnalyticTimeFrequencyWaveform:
             Physical parameters as a named dictionary or a pre-ordered 2-D array.
 
         Returns
-        -------
+        ----------
         ndarray, shape (n_sources, n_params + n_derived)
             The parameter cache with derived parameters filled in.
         """
@@ -276,6 +314,7 @@ class AnalyticTimeFrequencyWaveform:
 
         n_sources = raw.shape[0]
 
+        # Re-allocating parameter cache if n_sources changes, or if the dtyle changes (e.g. from array to dict)
         if (
             self._param_cache is None
             or self._param_cache.shape[0] != n_sources
@@ -285,12 +324,24 @@ class AnalyticTimeFrequencyWaveform:
 
         # Assign the physical parameters, then compute the derived parameters in-place in the cache.
         self._param_cache[:, :n_phys] = raw
+
+        # Method of the model
         self.model.compute_derived_parameters(self._param_cache)
 
         return self._param_cache, single_source
 
     def _compute_segment_indices(self, parameters_cache):
-        """Derive per-source time-segment indices from the model's time bounds."""
+        """
+        Derive per-source time-segment indices from the model's time bounds.
+
+        Used for computing the time-index range the source is in the LISA band for each source in nsources, 
+        
+        Parameters
+        ----------
+        parameters_cache : ndarray, shape (n_sources, n_params + n_derived)
+            The parameters with derived parameters filled in.
+        
+        """
         xp = self.backend.xp
         nT = self.config["nT"]
         dT = self.config["dT"]
@@ -298,7 +349,9 @@ class AnalyticTimeFrequencyWaveform:
         nF = self.config["nF"]
         frequency_band = (dF, nF * dF)
 
-        # Fill in segment start and end indices based on the model's time bounds for the given parameters and frequency band. If no bounds are returned, default to the full segment.
+        # Fill in segment start and end indices based on the model's time bounds for the given parameters and frequency band. 
+        #   If no bounds are returned, default to the full segment.
+        #   Used to work out which time-segments the statistics/waveforms should actually be computed for. 
         bounds = self.model.get_time_bounds(parameters_cache, frequency_band)
 
         if bounds is None:
@@ -320,6 +373,7 @@ class AnalyticTimeFrequencyWaveform:
                 xp.asarray(t_end, dtype=np.float64) / dT
             ).astype(np.int32)
 
+            # Cliping begin and end segments to be within the valid range of [0, nT-1].
             segment_start_inds = xp.clip(segment_start_inds, 0, nT - 1)
 
             segment_end_inds = xp.clip(segment_end_inds, 0, nT - 1)
@@ -338,15 +392,14 @@ class AnalyticTimeFrequencyWaveform:
         N_seg: int | None = None,
         mixed_precision: bool = False,
     ):
-        """Evaluate the analytic waveform or inner-product statistic.
+        """Evaluate the analytic waveform/inner-product statistic/search statistic.
 
         Parameters
         ----------
         parameters : dict or array_like, shape (n_sources, n_params)
             Source parameters as a named dict or a 2-D array in model order.
         channels : array_like or None
-            Data array of shape ``(nT, nF, n_channels)``. If not supplied
-            will use the stored channels from initialisation.
+            Data array of shape ``(nT, nF, n_channels)``.
         psds : array_like, optional
             Power spectral densities, shape ``(nT, nF, n_channels)``.
             Required for statistic output. If not supplied
@@ -375,7 +428,7 @@ class AnalyticTimeFrequencyWaveform:
         Returns
         -------
         ndarray
-            Channels ``(n_sources, nT, nF, n_channels)`` when
+            out ``(n_sources, nT, nF, n_channels)`` when
             ``return_statistic=False``, or statistic ``(n_sources, nT, 2)``
             when ``return_statistic=True``.
         """
@@ -391,8 +444,11 @@ class AnalyticTimeFrequencyWaveform:
         nT = self.config["nT"]
         nF = self.config["nF"]
 
+    # Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``
         if parameters_response is None:
+            
             if self.tdi_type is None:
+                # These variables are still required for the evaluation, so fill them in as dummy empty arrays. 
                 parameters_response = xp.zeros(
                     (n_sources, 4), dtype=np.float64
                 )
@@ -405,7 +461,7 @@ class AnalyticTimeFrequencyWaveform:
                 f"parameters_response must have shape {(n_sources, 4)}"
             )
 
-        # Compute likelihood/detection statistics
+        # Branch: Compute either d_h and h_h per segment, or the semi-coherent search statistics. 
         if compute_statistic:
             if channels is None:
                 channels = self.channels
@@ -422,9 +478,10 @@ class AnalyticTimeFrequencyWaveform:
                     (n_sources, 4), dtype=np.float64
                 )
 
-            # Not search statistic
+            # Branch: Compute d_h and h_h per segment. 
             if N_seg is None:
-                # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2). If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).
+                # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2). 
+                #   If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).
                 if out is None:
                     # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
                     # This array will be filled in by the kernel
@@ -432,7 +489,8 @@ class AnalyticTimeFrequencyWaveform:
                 else:
                     # If output array is supplied, zero it as a safety measure to ensure no uninitialised values are used.
                     out.fill(0.0)
-
+                
+                # Statistic kernel is responsible for computing waveforms->response->TDI->inner-products->statistics. 
                 self.statistic_kernel(
                     n_sources,
                     channels,
@@ -446,9 +504,11 @@ class AnalyticTimeFrequencyWaveform:
                     psds,
                     mixed_precision,
                 )
-            # Search
+            # Branch: Compute the semi-coherent search-statistic.
+            #   NOTE: This branch/option does not return d_h and h_h at a time-segment level
+            #   It returns the direct summed semi-coherent statistic for the whole signal evalution for each source. 
             else:
-                # If search_statistic output array is not supplied, allocate an array to store the final semi-coherent search statistic (upsilon) with shape (n_sources,).
+                # If search_statistic output array is not supplied, allocate an array to store the semi-coherent search statistic (upsilon) with shape (n_sources,).
                 if search_statistic is None:
                     if mixed_precision:
                         search_statistic = xp.zeros(
@@ -476,7 +536,7 @@ class AnalyticTimeFrequencyWaveform:
                 # Output is search statistic in this case.
                 out = search_statistic
 
-        # Compute waveforms
+        # Branch: Compute waveforms/TDI channels. No statistic computation.
         else:
             if out is None:
                 out = xp.zeros(
