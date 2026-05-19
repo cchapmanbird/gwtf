@@ -106,6 +106,9 @@ def analytic_kernel_constructor(
 
         Kernel output is the filled-in statistic array (d_h and h_h for each time-segment) if compute_statistic is True, or the computed waveforms if compute_statistic is False.
 
+        Note the bad amplitude convention.
+        The amplitude function is setup such that the returned amplitude is the amplitude of h_22, and the waveform polarizations are setup such that h_+ ~ A/2 cos (phi) and h_x ~ A/2 sin (phi). This is a bad convention, but we are sticking with it for now to avoid confusion.
+
         Parameters:
         ----------
         src_num: int
@@ -178,9 +181,10 @@ def analytic_kernel_constructor(
             )
             amp_mode = (
                 _get_amplitude(t_tranche, f0_mode, fdot_mode, params_source)
-                / 2 # TODO: Figure out this cursed factor of 2, should not be there if i am dealing with h_lm(t) in principle, only if i am dealing with h_+/x(t)
+                / 2 # This factor of 2 is to convert to h_22 amplitude (h_22 ~ h+ - ih_x) and the amplitude is setup such that h_+ ~ A/2 cos (phi). This is a bad convention!, but we are sticking with it for now
             )
 
+            # Start index in frequency bins for the given mode frequency, used to determine which frequency bins to compute over in the kernel.
             start_ind = int(f0_mode / dF)
             d_h = 0.0 + 0.0j
             h_h = 0.0 + 0.0j
@@ -190,15 +194,18 @@ def analytic_kernel_constructor(
                 for i in range(3):
                     Ls[i] = spacecraft_ltts[t_idx, i]
 
+                # Fill in position vectors for this time step
                 for i in range(3):
-                    for j in range(3):
+                    for j in range(3):        
                         p[i, j] = spacecraft_orbits[t_idx, i, j]
                 transfer_functions = _get_channels(
                     f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
 
+            # Cheap way to check how many extra frequency bins to compute over for the given fdot
             extra_fdot_bins = int((fdot_mode * dT) / dF)
 
+            
             if mixed_precision:
                 amp_mode = np.float32(amp_mode)
                 phi0_mode = np.float32(phi0_mode % (2 * np.pi))
@@ -211,7 +218,7 @@ def analytic_kernel_constructor(
                         np.complex64(transfer_functions[1]),
                         np.complex64(transfer_functions[2]),
                     )
-
+            # For each frequeny bin within the time-segment, compute the fresnel. 
             for f_rel_idx in range(
                 -kernel_width, kernel_width + extra_fdot_bins + 1
             ):
@@ -226,16 +233,18 @@ def analytic_kernel_constructor(
                         fdot_mode,
                         dT_prec,
                     )
-
+                    # Generate just the polarizations
                     if not tdi:
                         h_TT = _get_channels(h_f_pos, params_source)
-
+                    
+                    # Generate AET channels via multiplicative, frequency-domain transfer function. 
                     for i in range(channels.shape[-1]):
                         if tdi:
                             h = h_f_pos * transfer_functions[i]
                         else:
                             h = h_TT[i]
-
+                        
+                        # If compute_statistic is True, compute the inner products for d_h and h_h using the data in channels and the computed waveform h, and the psd in psds.
                         if compute_statistic:
                             d = channels[t_idx, f_idx, i]
                             psd = psds[t_idx, f_idx, i]
@@ -261,10 +270,45 @@ def analytic_kernel_constructor(
         psds,
         mixed_precision,
     ):
+        '''
+        Wrapper for the Fresnel_kernel to launch on GPU. 
+        Each thread computes the Fresnel waveforms and statistics for a single source across all time-segments.
+        This function instantiates the local arrays needed for the kernel_inner function, and calls kernel_inner for each source.
+
+        Parameters: 
+        ----------
+        channels: array (n_sources, nT, nF, n_channels)
+            Either the array to be filled in with the computed waveforms for each time-segment and frequency bin (if compute_statistic is False)
+            Or the data array to be used to compute statistics (d_h and h_h) if compute_statistic is True.
+        segment_start_inds: array (n_sources,)
+            The starting time-segment index for each source. Used to determine which time-segments to compute over for the given source.
+        segment_end_inds: array (n_sources,)
+            The ending time-segment index for each source. Used to determine which time-segments to compute over for the given source.
+        parameters: array (n_sources, nparams)
+            The parameters describing each source. This is used to compute the waveform for the given source.
+        parameters_response: array (n_sources, 4) or None
+            The parameters describing the response for each source, used if tdi is True. This is used to compute the TDI response for the given source.
+        spacecraft_orbits: array (nT, 3, 3) or None
+            Spacecraft orbits, used for TDI response computation if tdi is True.
+            Used to fill in the p array within the kernel for TDI response computation.
+            NOTE: Precomputed, not computed in the kernel at runtime.
+        spacecraft_ltts: array (nT, 3) or None
+            Light travel times for each spacecraft, used for TDI response computation if tdi is True
+            Used to fill in the Ls array within the kernel for TDI response computation.
+        statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
+            Local array to store the computed statistics (d_h and h_h for each time-segment for the given source. 
+        psds: array (nT, nF, n_channels) or None
+            The power spectral density of the noise, used to compute the inner products for the statistics if compute_statistic is True. 
+        mixed_precision: bool
+            Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        '''
+        # one source per thread
         src_num = (
             cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
-        )  # one source per thread
+        )  
+        # one source per thread
         if src_num < parameters.shape[0]:
+            # These are all the local arrays that will be filled in within the kernel_inner function.
             params_source = cuda.local.array(nparams, dtype=parameters.dtype)
             P_lm = cuda.local.array((3, 3), dtype=np.complex128)
             k = cuda.local.array((3,), dtype=parameters_response.dtype)
@@ -308,6 +352,38 @@ def analytic_kernel_constructor(
         psds,
         mixed_precision,
     ):
+        '''
+        Wrapper for the Fresnel_kernel to launch on CPU. 
+        NOTE: No signficant parallelisation for CPU version, just a loop over sources.
+        
+        Parameters: 
+        ----------
+        channels: array (n_sources, nT, nF, n_channels)
+            Either the array to be filled in with the computed waveforms for each time-segment and frequency bin (if compute_statistic is False)
+            Or the data array to be used to compute statistics (d_h and h_h) if compute_statistic is True.
+        segment_start_inds: array (n_sources,)
+            The starting time-segment index for each source. Used to determine which time-segments to compute over for the given source.
+        segment_end_inds: array (n_sources,)
+            The ending time-segment index for each source. Used to determine which time-segments to compute over for the given source.
+        parameters: array (n_sources, nparams)
+            The parameters describing each source. This is used to compute the waveform for the given source.
+        parameters_response: array (n_sources, 4) or None
+            The parameters describing the response for each source, used if tdi is True. This is used to compute the TDI response for the given source.
+        spacecraft_orbits: array (nT, 3, 3) or None
+            Spacecraft orbits, used for TDI response computation if tdi is True.
+            Used to fill in the p array within the kernel for TDI response computation.
+            NOTE: Precomputed, not computed in the kernel at runtime.
+        spacecraft_ltts: array (nT, 3) or None
+            Light travel times for each spacecraft, used for TDI response computation if tdi is True
+            Used to fill in the Ls array within the kernel for TDI response computation.
+        statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
+            Local array to store the computed statistics (d_h and h_h for each time-segment for the given source. 
+        psds: array (nT, nF, n_channels) or None
+            The power spectral density of the noise, used to compute the inner products for the statistics if compute_statistic is True. 
+        mixed_precision: bool
+            Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        '''
+
         for src_num in range(parameters.shape[0]):
             params_source = np.zeros(nparams, dtype=parameters.dtype)
             P_lm = np.zeros((3, 3), dtype=np.complex128)

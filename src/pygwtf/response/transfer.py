@@ -8,6 +8,18 @@ from ..constants import clight
 
 @njit
 def Ylms(cosi, phi):
+    ''''
+    *Un-normalised* spherical harmonics for Y_{2,2} and Y_{2,-2}.
+    TODO: Figure out how come the un-normalised ones seem to work? 
+
+    Parameters:
+    ----------
+    cosi: float
+        cosine of the inclination angle of the source (angle between the line of sight and the orbital angular momentum vector)
+    phi: float
+        Reference phase rotation of the source (angle between the line of sight and the major axis of the binary's orbit)
+        NOTE: Usually set to zero within our code. Rotations are absorbed in the waveform phase definition itself. 
+    '''
     two_cosi = cosi * 2
     cosi2 = cosi * cosi
     expn = exp(1j * 2 * phi)
@@ -19,10 +31,17 @@ def Ylms(cosi, phi):
 @njit
 def fill_P_lm(P_lm, parameters):
     """
-    Eqn 16. from https://arxiv.org/pdf/2003.00357
+    Polarization matrices from Eqn 16. in https://arxiv.org/pdf/2003.00357
 
-    On GPU or CPU we could use arrays and a loop to make this less cumbersome
-    However, I don't know how to do that in an agnostic fashion (this is a device function) so we're going to write it all out
+    Parameters:
+    ----------
+    P_lm: array (3,3)
+        array to be filled with the P_lm coefficients for the source, as defined in https://arxiv.org/pdf/2003.00357
+    parameters: array (4,)
+                [0] cosi: cosine of the inclination angle of the source (angle between the line of sight and the orbital angular momentum vector)
+                [1] pol: polarization angle of the source (angle between the line of sight and the major axis of the binary's orbit)
+                [2] ecliptic_long: ecliptic longitude of the source
+                [3] ecliptic_lat: ecliptic latitude of the source
     """
     cosi = parameters[0]
     pol = parameters[1]
@@ -95,6 +114,18 @@ def fill_P_lm(P_lm, parameters):
 
 @njit
 def fill_k(k, parameters):
+    '''
+    Wavevector pointing from the source to the centre of the SSB frame, in ecliptic coordinates.
+    Parameters:
+    ----------
+    k : array (3,)
+        array to be filled with the components of the wavevector pointing from the source to the centre of the SSB frame.
+    parameters: array (4,)
+            [0] cosi: cosine of the inclination angle of the source (angle between the line of sight and the orbital angular momentum vector)
+            [1] pol: polarization angle of the source (angle between the line of sight and the major axis of the binary's orbit)
+            [2] ecliptic_long: ecliptic longitude of the source
+            [3] ecliptic_lat: ecliptic latitude of the source
+    '''
     ecliptic_long = parameters[2]
     ecliptic_lat = parameters[3]
     cos_lat = cos(ecliptic_lat)
@@ -105,6 +136,26 @@ def fill_k(k, parameters):
 
 @njit
 def dot_three_unpack_sum(a, b, i, j):
+    ''''
+    Computes the sum a[0] * (b[i, 0] + b[j, 0]) + a[1] * (b[i, 1] + b[j, 1]) + a[2] * (b[i, 2] + b[j, 2])
+
+    Parameters:
+    ----------
+    a: array (3,)
+        3-vector
+    b: array (3,3)
+        3x3 matrix
+    i: int
+        first index for b
+    j: int
+        second index for b
+
+    Returns:
+    -------
+    result: float
+        the result of the sum a[0] * (b[i, 0] + b[j, 0]) + a[1] * (b[i, 1] + b[j, 1]) + a[2] * (b[i, 2] + b[j, 2])
+    '''
+
     return (
         a[0] * (b[i, 0] + b[j, 0])
         + a[1] * (b[i, 1] + b[j, 1])
@@ -114,6 +165,21 @@ def dot_three_unpack_sum(a, b, i, j):
 
 @njit
 def dot_R(k, p):
+    '''
+    Computes the dot product of the wavevector k with the sum of the position vectors p[i] for i=0,1,2.
+
+    Parameters:
+    ----------
+    k: array (3,)
+        wavevector pointing from the source to the centre of the SSB frame, in ecliptic coordinates.
+    p: array (3,3)
+        positions of the spacecraft in the SSB frame (Ecliptic coordinates) 
+
+    Returns:
+    -------
+    result: float
+        the result of the dot product of the wavevector k with the sum of the position vectors
+    '''
     return (
         k[0] * (p[0, 0] + p[1, 0] + p[2, 0])
         + k[1] * (p[0, 1] + p[1, 1] + p[2, 1])
@@ -123,11 +189,42 @@ def dot_R(k, p):
 
 @njit
 def dot_three_unpack2(a, b, k):
+    '''
+    Computes the sum a[0] * b[k, 0] + a[1] * b[k, 1] + a[2] * b[k, 2]
+    
+    Parameters:
+    ----------
+    a: array (3,)
+        3-vector
+    b: array (3,3)
+        3x3 matrix
+    k: int
+        index for b
+
+    Returns:
+    -------
+    result: float
+        the result of the sum a[0] * b[k, 0] + a[1] * b[k, 1] + a[2] * b[k, 2]
+    '''
     return a[0] * b[k, 0] + a[1] * b[k, 1] + a[2] * b[k, 2]
 
 
 @njit
 def _matrix_res_pro(n_0, n_1, n_2, p):
+    '''
+    Custom type of matrix product that appears in the transfer function calculations. Computes the sum of n[i] * p[i, j] * n[j] for i,j=0,1,2.
+
+    Parameters:
+    n_0, n_1, n_2: float
+        components of the unit vector pointing along the arm of the interferometer.
+    p: array (3,3)
+        P_lm coefficients for the source, as defined in https://arxiv.org/pdf/2003.00357
+    Returns:
+    -------
+    result: float
+        the result of the sum of n[i] * p[i, j] * n[j]
+    '''
+
     return (
         n_0 * p[0, 0] * n_0
         + n_0 * p[0, 1] * n_1
@@ -143,6 +240,19 @@ def _matrix_res_pro(n_0, n_1, n_2, p):
 
 @njit
 def sinc(x):
+    '''
+    Sinc function, sin(x)/x
+
+    Parameters:
+    ----------
+    x: float
+        input to the sinc function
+    Returns:
+    -------
+    result: float
+        the result of the sinc function, sin(x)/x. Returns 1 if x=0 to avoid division by zero.
+
+    '''
     if x == 0:
         return 1
     else:
@@ -151,6 +261,25 @@ def sinc(x):
 
 @njit
 def threevector_diff_norm(x, i, j):
+    '''
+    Computes the norm of the difference between two 3-vectors x[i] and x[j].
+
+    Parameters:
+    ----------
+    x: array (3,3)
+        array of 3-vectors
+    i: int
+        index of the first vector
+    j: int
+        index of the second vector  
+
+    Returns:
+    -------
+    result: float
+        the norm of the difference between x[i] and x[j], computed as sqrt((x[i, 0] - x[j, 0])^2 + (x[i, 1] - x[j, 1])^2 + (x[i, 2] - x[j, 2])^2)
+    '''
+
+
     return (
         (x[i, 0] - x[j, 0]) ** 2
         + (x[i, 1] - x[j, 1]) ** 2
@@ -161,14 +290,40 @@ def threevector_diff_norm(x, i, j):
 @njit
 def build_ysrl(f, k, n, p, Ls, P_lm):
     """
-    Builds all the y_slr
+    Builds transfer function for *single* link responses. 
+    s: source index (0,1,2 for the 3 spacecraft)
+    l: link index (0,1,2 for the 3 arms)
+    r: response index (0,1 for the two directions of the link)
+    NOTE: Usually the convention is 'slr' but here we use a slightly different convention 'srl'
 
     y_sr = [[1,2],
-            [2,1],
-            [1,3],
-            [3,1],
-            [2,3],
-            [3,2]]
+        [2,1],
+        [1,3],
+        [3,1],
+        [2,3],
+        [3,2]]
+
+    Parameters:
+    ----------
+    f: float
+        frequency at which to evaluate the transfer function
+    k: array (3,)
+        Unit vector pointing from the source to the centre of the SSB frame
+    n: array (3,3) (to be filled in within the function)
+        unit vectors pointing along the arms of the interferometer. 
+    p: array (3,3)
+        positions of the spacecraft in the SSB frame (Ecliptic coordinates)
+    Ls: array (3,)
+        arm lengths of the interferometer (metres)
+    P_lm: array (3,3)
+        P_lm coefficients for the source, as defined in https://arxiv.org/pdf/2003.00357
+    
+    Returns:
+    -------
+    ysrl_123, ysrl_213, ysrl_132, ysrl_312, ysrl_231, ysrl_321: complex
+        the single link responses for the 6 possible combinations of s, r, l. The indices correspond to the following combinations of s, r, l:
+        srl: 1->2, 2->1, 1->3, 3->1, 2->3, 3->2 respectively. Note that the convention here is 'srl' instead of 'slr'.
+
     """
 
     iomega_over_2c = 1j * pi * f / (clight)
@@ -227,6 +382,41 @@ def build_ysrl(f, k, n, p, Ls, P_lm):
 
 @njit
 def get_XYZ_TFs(f, P_lm, k, p, Ls, n, tdi2):
+    '''
+    Construct the single link response functions and then combine them appropriately to get the X,Y,Z transfer functions. 
+    Deals with slowly varying, unequal arm-lengths.
+
+    In this case we are assuming 
+        - Arm lengths are unequal but slowly varying
+        - Delays commute. 
+        - The delay factors effectively map to the (1-D^4) that is found in TDI 1.5 case to go from TDI-1 to TDI-2 (equal arm-length case)
+    Under these approximations the TDI equations below reduce exactly to the equations for TDI-2. 
+    Checking the Rosetta stone equations for TDI-2, simplifying them, assuming commuting delays, one recovers the TDI-equations used here I think. 
+
+    
+    X = (G31 + G13*z2 - G21 - G12*z3) - (G31*z3*z3 + G13*z2*z3*z3 - G21*z2*z2 - G12*z3*z2*z2)
+    Y = (G12 + G21*z3 - G32 - G23*z1) - (G12*z1*z1 + G21*z3*z1*z1 - G32*z3*z3 - G23*z1*z3*z3)
+    Z = (G23 + G32*z1 - G13 - G31*z2) - (G23*z2*z2 + G32*z1*z2*z2 - G13*z1*z1 - G31*z2*z1*z1)
+
+    
+    Parameters:
+    ----------
+    f: float
+        frequency at which to evaluate the transfer functions
+    P_lm: array (3,3)
+        P_lm coefficients for the source, as defined in https://arxiv.org/pdf/2003.00357
+    k: array (3,)
+        Unit vector pointing from the source to the centre of the SSB frame
+    p: array (3,3)
+        positions of the spacecraft in the SSB frame (Ecliptic coordinates)
+    Ls: array (3,)
+        arm lengths of the interferometer (metres) 
+    n: array (3,3) (to be filled in)
+        unit vectors pointing along the arms of the interferometer.
+    tdi2: bool
+        whether to apply the TDI 2.0 correction factor (1 - z1^2 z2^2 z3^2) to the transfer functions.  
+
+    '''
     (
         ysrl_123,
         ysrl_213,
@@ -247,11 +437,6 @@ def get_XYZ_TFs(f, P_lm, k, p, Ls, n, tdi2):
     z1 = exp(x1)
     z2 = exp(x2)
     z3 = exp(x3)
-
-    # X = (G31 + G13*z2 - G21 - G12*z3) - (G31*z3*z3 + G13*z2*z3*z3 - G21*z2*z2 - G12*z3*z2*z2)
-    # Y = (G12 + G21*z3 - G32 - G23*z1) - (G12*z1*z1 + G21*z3*z1*z1 - G32*z3*z3 - G23*z1*z3*z3)
-    # Z = (G23 + G32*z1 - G13 - G31*z2) - (G23*z2*z2 + G32*z1*z2*z2 - G13*z1*z1 - G31*z2*z1*z1)
-
     X = (ysrl_312 + z2 * ysrl_132 - ysrl_213 - ysrl_123 * z3) - (
         ysrl_312 * z3 * z3
         + ysrl_132 * z2 * z3 * z3
@@ -281,6 +466,35 @@ def get_XYZ_TFs(f, P_lm, k, p, Ls, n, tdi2):
 
 @njit
 def get_AET_TFs(f, P_lm, k, p, Ls, n, tdi2):
+    ''''
+    'Master function' - Called directly by fresnel to get the AET transfer functions. (Default transfer function for analysis within this library)
+    Calls get_XYZ_TFs to get the X,Y,Z transfer functions, and then combines them appropriately to get A,E,T.
+    Deals with slowly varying, unequal arm-lengths. 
+
+    Parameters: 
+    ----------
+    f: float
+        frequency at which to evaluate the transfer functions
+    P_lm: array (3,3) 
+        P_lm coefficients for the source, as defined in https://arxiv.org/pdf/2003.00357
+    k: array (3,) 
+        Unit vector pointing from the source to the centre of the SSB frame
+    p: array (3,3) 
+        positions of the spacecraft in the SSB frame (Ecliptic coordinates)
+    Ls: array (3,)
+        arm lengths of the interferometer (metres)
+    n: array (3,3)
+        unit vectors pointing along the arms of the interferometer.
+    tdi2: bool
+        whether to apply the TDI 2.0 correction factor (1 - z1^2 z2^2 z3^2) to the transfer functions.
+    
+    Returns:
+    -------
+    A, E, T: complex
+        The A, E, T transfer functions for the source at frequency f.
+    '''
+
+
     X, Y, Z = get_XYZ_TFs(f, P_lm, k, p, Ls, n, tdi2)
 
     A = (Z - X) / 2.0**0.5
@@ -292,6 +506,26 @@ def get_AET_TFs(f, P_lm, k, p, Ls, n, tdi2):
 
 @njit
 def get_AET_TFs_equal_armlength(f, P_lm, k, p, n, tdi2):
+    ''''
+    DEPRECATED FUNCTION. 
+    Doing what is essentially the same thing as get_AET_TFs but assuming equal arm-lengths and doing some algebraic simplifications to get more compact expressions for the A,E,T transfer functions.
+    
+    Parameters:
+    ----------
+    f: float
+        frequency at which to evaluate the transfer functions
+    P_lm: array (3,3)
+        P_lm coefficients for the source, as defined in https://arxiv.org/pdf/
+    k: array (3,)
+        Unit vector pointing from the source to the centre of the SSB frame
+    p: array (3,3)
+        positions of the spacecraft in the SSB frame (Ecliptic coordinates)
+    n: array (3,3)
+        unit vectors pointing along the arms of the interferometer.
+    tdi2: bool
+        whether to apply the TDI 2.0 correction factor (1 - D^4) to the transfer functions.
+    
+    '''
     L = L = 2.5e9  # remove with unequal
 
     ysrl_123, ysrl_213, ysrl_132, ysrl_312, ysrl_231, ysrl_321, _, _, _ = (
