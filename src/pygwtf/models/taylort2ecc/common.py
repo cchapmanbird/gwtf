@@ -1,4 +1,4 @@
-from math import log, pi
+from math import log, pi, sqrt
 
 from numba import cuda, jit
 
@@ -654,19 +654,26 @@ def _get_phi_f_fdot(t, parameters):
 
 @jit
 def _get_amplitude(t, f, fdot, parameters):
+    '''
+    Note: Amplitude of *h_lm* not h_plus
+
+    See E.g. Eqn 79 of https://arxiv.org/pdf/0710.0614
+    '''
+
     M = parameters[0]
     eta = parameters[1]
     D = parameters[4]
     v = (pi * M * f) ** (1 / 3)
-    A = 2 * eta * M / D * (v) ** 2
+    A = 8*sqrt(pi/5)*eta * M / D * (v) ** 2
     return A
 
 
 @jit
 def _get_hplus_hcross(hlm, parameters):
     cosi = parameters[2]
-    hplus = -hlm * (1 + cosi**2)
-    hcross = -hlm * (2j * cosi)
+    Y22_norm = sqrt(5 / (64 * pi))
+    hplus = -hlm * Y22_norm * (1 + cosi**2)
+    hcross = -hlm * Y22_norm * (2j * cosi)
     return hplus, hcross
 
 

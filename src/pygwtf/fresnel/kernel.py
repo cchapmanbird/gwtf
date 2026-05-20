@@ -105,10 +105,7 @@ def analytic_kernel_constructor(
         This kernel is called by both the CPU and GPU kernels, with appropriate local array allocations for each hardware type.
 
         Kernel output is the filled-in statistic array (d_h and h_h for each time-segment) if compute_statistic is True, or the computed waveforms if compute_statistic is False.
-
-        Note the bad amplitude convention.
-        The amplitude function is setup such that the returned amplitude is the amplitude of h_22, and the waveform polarizations are setup such that h_+ ~ A/2 cos (phi) and h_x ~ A/2 sin (phi). This is a bad convention, but we are sticking with it for now to avoid confusion.
-
+        
         Parameters:
         ----------
         src_num: int
@@ -181,7 +178,6 @@ def analytic_kernel_constructor(
             )
             amp_mode = (
                 _get_amplitude(t_tranche, f0_mode, fdot_mode, params_source)
-                / 2 # This factor of 2 is to convert to h_22 amplitude (h_22 ~ h+ - ih_x) and the amplitude is setup such that h_+ ~ A/2 cos (phi). This is a bad convention!, but we are sticking with it for now
             )
 
             # Start index in frequency bins for the given mode frequency, used to determine which frequency bins to compute over in the kernel.

@@ -186,7 +186,6 @@ def analytic_kernel_constructor_semi_coherent(
                     _get_amplitude(
                         t_tranche, f0_mode, fdot_mode, params_source
                     )
-                    / 2
                 )
 
                 start_ind = int(f0_mode / dF)

@@ -9,8 +9,7 @@ from ..constants import clight
 @njit
 def Ylms(cosi, phi):
     ''''
-    *Un-normalised* spherical harmonics for Y_{2,2} and Y_{2,-2}.
-    TODO: Figure out how come the un-normalised ones seem to work? 
+    Normalised spherical harmonics for Y_{2,2} and Y_{2,-2}.
 
     Parameters:
     ----------
@@ -20,11 +19,12 @@ def Ylms(cosi, phi):
         Reference phase rotation of the source (angle between the line of sight and the major axis of the binary's orbit)
         NOTE: Usually set to zero within our code. Rotations are absorbed in the waveform phase definition itself. 
     '''
+    Y_22_norm = sqrt(5 / (64 * pi))
     two_cosi = cosi * 2
     cosi2 = cosi * cosi
     expn = exp(1j * 2 * phi)
-    Y_22 = (1 + two_cosi + cosi2) * expn
-    Y_2m2 = (1 - two_cosi + cosi2) * expn.conjugate()
+    Y_22 = Y_22_norm * (1 + two_cosi + cosi2) * expn
+    Y_2m2 = Y_22_norm * (1 - two_cosi + cosi2) * expn.conjugate()
     return Y_22, Y_2m2
 
 
