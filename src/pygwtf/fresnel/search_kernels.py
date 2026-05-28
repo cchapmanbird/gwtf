@@ -8,6 +8,12 @@ from ..utils import complex_inner_product
 from .common import _fresnel_kernel
 
 
+#------------------------------------------------------------------#
+# Following three functions are legact functions to compute the semi-coherent statistic via a post-processing of 
+#    the per-segment statistics computed by the original kernel. 
+#    This is currently unused as we want to make use of the fact that we can compute the semi-coherent statistic directly in the kernel without first storing a full (n_sources, nT, 2) array of per-segment statistics, which is very memory intensive.
+#    Keeping this here for the future when multi-mode waveforms are implemented. 
+
 @jit
 def semi_coherent_statistic_sum(
     src_num,
@@ -61,6 +67,24 @@ def semi_coherent_statistic_sum(
 def semi_coherent_statistic_sum_gpu_wrap(
     statistics, N_seg, segment_end_inds, segment_start_inds, search_statistic
 ):
+    '''
+    GPU wrapper for the semi-coherent statistic sum. Each thread computes the semi-coherent statistic for a single source.
+    NOTE: This is currently unused, as we compute the semi-coherent statistic directly in the kernel.
+
+    Parameters:
+    ----------
+    statistics: array (n_sources, n_time_bins, 2)
+        Array containing the per-segment statistics (d|h and h|h) for each source and time-segment.
+    N_seg: int
+        Number of segments that were summed over to get each per-segment statistic.
+    segment_end_inds: array (n_sources,)
+        Array containing the end indices of the segments for each source.
+    segment_start_inds: array (n_sources,)
+        Array containing the start indices of the segments for each source.
+    search_statistic: array (n_sources,) (filled in within the kernel)
+        Array to be filled in with the semi-coherent statistic for each source. 
+
+    '''
     src_num = cuda.grid(1)  # one thread for each source
     # Check if the thread index is within the bounds of the statistic array (checking for edge case where the thread grid might be larger than the number of sources)
     # If a thread has a index higher than the number of sources, it should not do anything.
@@ -74,12 +98,31 @@ def semi_coherent_statistic_sum_gpu_wrap(
 def semi_coherent_statistic_sum_cpu_wrap(
     statistics, N_seg, segment_end_inds, segment_start_inds, search_statistic
 ):
+    '''
+    CPU wrapper for the semi-coherent statistic sum. Each source is processed sequentially.
+    NOTE: This is currently unused, as we compute the semi-coherent statistic directly in the kernel.
+
+    Parameters:
+    ----------
+    statistics: array (n_sources, n_time_bins, 2)
+        Array containing the per-segment statistics (d|h and h|h) for each source and time-segment.
+    N_seg: int
+        Number of segments that were summed over to get each per-segment statistic. 
+    segment_end_inds: array (n_sources,)
+        Array containing the end indices of the segments for each source.
+    segment_start_inds: array (n_sources,)
+        Array containing the start indices of the segments for each source.
+    search_statistic: array (n_sources,) (filled in within the function)
+        Array to be filled in with the semi-coherent statistic for each source. 
+    '''
     # For each source
     for src_num in range(statistics.shape[0]):
         search_statistic[src_num] = semi_coherent_statistic_sum(
             src_num, statistics, N_seg, segment_end_inds, segment_start_inds
         )
 
+#------------------------------------------------------------------#
+# Beginning the actual used search kernels. 
 
 def analytic_kernel_constructor_semi_coherent(
     config: dict,
