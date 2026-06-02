@@ -1,4 +1,4 @@
-from math import log, pi
+from math import log, pi, sqrt
 
 from numba import cuda, jit
 
@@ -654,24 +654,73 @@ def _get_phi_f_fdot(t, parameters):
 
 @jit
 def _get_amplitude(t, f, fdot, parameters):
+    '''
+    Newtonian Amplitude for the (2,2) mode. 
+
+    Note: Amplitude of *h_lm* not h_plus
+
+    See E.g. Eqn 79 of https://arxiv.org/pdf/0710.0614
+
+    Parameters:
+    ----------
+        t (float): Time at which to evaluate the amplitude.
+        f (float): Frequency at which to evaluate the amplitude.
+        fdot (float): Time derivative of the frequency at time t.
+        parameters (array-like): An array containing the parameters of the system, where:
+            parameters[0] (float): Total mass M of the binary system.
+            parameters[1] (float): Symmetric mass ratio eta of the binary system.
+            parameters[3] (float): Distance D to the binary system. 
+
+    Returns:
+        A (float): The amplitude of the (2,2) mode at time t. 
+    '''
+
     M = parameters[0]
     eta = parameters[1]
     D = parameters[4]
     v = (pi * M * f) ** (1 / 3)
-    A = 2 * eta * M / D * (v) ** 2
+    A = 8*sqrt(pi/5)*eta * M / D * (v) ** 2
     return A
 
 
 @jit
 def _get_hplus_hcross(hlm, parameters):
+    '''
+    Get hplus and hcross from hlm for the (2,2) mode.
+
+    Assume the waveform amplitude is appropriately normalized such that hlm is the amplitude of the (2,2) mode. 
+    Uses the normalised form of the spin-weighted spherical harmonic Y22. 
+
+    Parameters:
+    ----------
+        hlm (float): The amplitude of the (2,2) mode of the waveform.
+        parameters (array-like): An array containing the parameters of the system, where:
+            parameters[2] (float): Cosine of the inclination angle of the binary system.
+
+    Returns:
+        hplus (float): The plus polarization of the gravitational wave.
+        hcross (float): The cross polarization of the gravitational wave.        
+    
+    '''
     cosi = parameters[2]
-    hplus = -hlm * (1 + cosi**2)
-    hcross = -hlm * (2j * cosi)
+    Y22_norm = sqrt(5 / (64 * pi))
+    hplus = -hlm * Y22_norm * (1 + cosi**2)
+    hcross = -hlm * Y22_norm * (2j * cosi)
     return hplus, hcross
 
 
 @jit
 def _get_time_to_coalescence(M, eta, e0, f0):
+    '''
+    Get time to coalescence from a given starting frequency f0.
+
+    Parameters: 
+    ----------
+        M (float): Total mass of the binary system.
+        eta (float): Symmetric mass ratio of the binary system.
+        e0 (float): Initial eccentricity. 
+        f0 (float): Starting frequency from which to calculate the time to coalescence.
+    '''
     v0 = (pi * M * f0) ** (1 / 3)
     tc = 5 / 256 * M / eta / (v0**8) * _calculate_T(v0, v0, e0, eta)
     return tc
@@ -679,6 +728,20 @@ def _get_time_to_coalescence(M, eta, e0, f0):
 
 @jit
 def _get_time_to_coalescence_cpu_wrap(t_coal, parameters):
+    '''
+    CPU-wrapper for time-to-coalescence function. 
+    Loops through each set of parameters and calculates time to merger 
+
+    Parameters:
+    ----------
+        t_coal (array-like): An array to store the calculated time to coalescence (array to be filled in place).
+        parameters (array-like): An array of shape (N,Ndim) containing the parameters for N different binary systems, where each row corresponds to a binary system and the columns correspond to the parameters in the following order:
+            parameters[i, 0] (float): Total mass M of the binary system.
+            parameters[i, 1] (float): Symmetric mass ratio eta of the binary system
+            parameters[i, 3] (float): Initial eccentricity defined at e0
+            parameters[i, 5] (float): Initial GW frequency.
+    
+    '''
     for i in range(len(t_coal)):
         t_coal[i] = _get_time_to_coalescence(
             parameters[i, 0],
@@ -690,6 +753,21 @@ def _get_time_to_coalescence_cpu_wrap(t_coal, parameters):
 
 @cuda.jit
 def _get_time_to_coalescence_gpu_wrap(t_coal, parameters):
+    '''
+    GPU-wrapper for time-to-coalescence function. 
+    Each thread calculates the time to coalescence for a single set of parameters.
+
+
+    Parameters:
+    ----------
+        t_coal (array-like): An array to store the calculated time to coalescence (array to be filled in place).
+        parameters (array-like): An array of shape (N,Ndim) containing the parameters for N different binary systems, where each row corresponds to a binary system and the columns correspond to the parameters in the following order:
+            parameters[i, 0] (float): Total mass M of the binary system.
+            parameters[i, 1] (float): Symmetric mass ratio eta of the binary system
+            parameters[i, 3] (float): Initial eccentricity defined at e0
+            parameters[i, 5] (float): Initial GW frequency.
+    
+    '''
     idx = cuda.grid(1)
     if idx < t_coal.size:
         t_coal[idx] = _get_time_to_coalescence(
@@ -702,6 +780,22 @@ def _get_time_to_coalescence_gpu_wrap(t_coal, parameters):
 
 @jit
 def _get_time_to_f(f, tc, M, eta, e0, f0):
+    '''
+    Get time to coalescence from a given frequency f.
+    Uses direct analytical inversion of the frequency function to get time as a function of frequency.
+
+    Parameters:
+    ----------
+        f (float): Frequency.
+        tc (float): Time to coalescence
+        M (float): Total mass.
+        eta (float): Symmetric mass ratio.
+        e0 (float): Initial frequency.
+
+    Returns:
+    -------
+        t_to_f (float): Time to coalescence from the given frequency f.
+    '''
     v0 = (pi * M * f0) ** (1 / 3)
     v = (pi * M * f) ** (1 / 3)
     tc_from_f = 5 / 256 * M / eta / (v**8) * _calculate_T(v, v0, e0, eta)
@@ -710,6 +804,21 @@ def _get_time_to_f(f, tc, M, eta, e0, f0):
 
 @jit
 def _get_time_to_f_cpu_wrap(t_from_f, f, tc, parameters):
+    '''
+    CPU-wrapper for time-from-frequency function.
+    Loops through each set of parameters and calculates time to merger from frequency f.
+    Parameters:
+    ----------
+        t_from_f (array-like): An array to store the calculated time to coalescence
+        f (float): Frequency from which to calculate the time to coalescence.
+        tc (array-like): An array containing the time to coalescence for each set of
+            parameters, where tc[i] corresponds to the time to coalescence for the i-th set of parameters.
+        parameters (array-like): An array of shape (N, 12) containing the parameters for N different binary systems.
+            parameters[i, 0] (float): Total mass M of the binary system.
+            parameters[i, 1] (float): Symmetric mass ratio eta of the binary system
+            parameters[i, 3] (float): Initial eccentricity, defined at f0. 
+            parameters[i, 5] (float): Initial GW frequency.
+    '''
     for i in range(len(t_from_f)):
         t_from_f[i] = _get_time_to_f(
             f,
@@ -723,6 +832,21 @@ def _get_time_to_f_cpu_wrap(t_from_f, f, tc, parameters):
 
 @cuda.jit
 def _get_time_to_f_gpu_wrap(t_to_f, f, tc, parameters):
+    '''
+    CPU-wrapper for time-from-frequency function.
+    Each thread calculates the time to coalescence from frequency f for a single set of parameters
+    Parameters:
+    ----------
+        t_from_f (array-like): An array to store the calculated time to coalescence
+        f (float): Frequency from which to calculate the time to coalescence.
+        tc (array-like): An array containing the time to coalescence for each set of
+            parameters, where tc[i] corresponds to the time to coalescence for the i-th set of parameters.
+        parameters (array-like): An array of shape (N, 12) containing the parameters for N different binary systems.
+            parameters[i, 0] (float): Total mass M of the binary system.
+            parameters[i, 1] (float): Symmetric mass ratio eta of the binary system
+            parameters[i, 3] (float): Initial eccentricity, defined at f0. 
+            parameters[i, 5] (float): Initial GW frequency.
+    '''
     idx = cuda.grid(1)
     if idx < t_to_f.size:
         t_to_f[idx] = _get_time_to_f(

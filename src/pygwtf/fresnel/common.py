@@ -6,6 +6,25 @@ from numba import jit
 
 @jit
 def _fresnel(x):
+    """
+    Asymptotic expansion approximation for Fresnel Integrals: 
+
+    Reference: 'Polynomial approximations for Fresnel integrals in diffraction analysis'- Michael E. McCormick a,*, David R.B. Kraemer 
+                 https://www.sciencedirect.com/science/article/pii/S0378383901000345?via%3Dihub - Section. 3, Eq. 18. 
+    
+    Parameters:
+    ----------
+    x: float
+        The argument to the Fresnel integrals.
+
+    Returns:
+    -------
+    Sx_approx: float
+        Approximation to the Fresnel S integral at x.
+    Cx_approx: float
+        Approximation to the Fresnel C integral at x.    
+    
+    """
     ax = abs(x)
 
     pix = pi * ax
@@ -30,6 +49,29 @@ def _fresnel(x):
 
 @jit
 def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T):
+    """
+    Box-car window fresnel waveform kernel. 
+
+    Parameters:
+    ----------
+    f_bin: float
+        The frequency at the centre of the bin being evaluated.
+    amp_mode: float
+        The amplitude of the mode being evaluated, evaluated at the beginning of the segment. 
+    phase_mode: float
+        The phase of the mode being evaluated, evaluated at the beginning of the segment.
+    f_mode: float
+        The frequency of the mode being evaluated, evaluated at the beginning of the segment.
+    fdot_mode: float
+        The frequency derivative of the mode being evaluated, evaluated at the beginning of the segment.
+    T: float
+        The duration of the segment being evaluated.
+
+    Returns:
+    -------
+    fct: complex
+        The Fresnel waveform for the given mode, within a time-segment. Evaluated at f_bin. 
+    """
     rt2fdot = sqrt(2 * fdot_mode)
 
     prefac = amp_mode / rt2fdot

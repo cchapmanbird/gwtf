@@ -14,6 +14,7 @@ def phase(x, sigma, delta, eta, s):
     https://github.com/davidtrestini/PNpedia/blob/275c95c8f6765d5628eeb2549d17250cd16e6617/Core%20post-Newtonian%20quantities/Circular%20orbits/Spinning/Nonprecessing/Without%20tidal%20effects/Waveform/phase.txt
 
     Parameters:
+    ----------
         x (float): The PN expansion parameter, defined as (pi*M*f)^(2/3), where M is the total mass of the binary and f is the GW frequency.
         sigma (float): Reduced spin parameter (m2 * s2 - m1 * s1) / M
         delta (float): Mass difference parameter (m1 - m2) / M
@@ -21,6 +22,7 @@ def phase(x, sigma, delta, eta, s):
         s (float): Spin parameter (m1**2 * s1 + m2**2 * s2) / (M**2)
 
     Returns:
+    -------
         Phi_0_minus_phi (float): The value of Phi_0 - phi at the given x, sigma, delta, eta, and s.
     """
 
@@ -129,6 +131,7 @@ def frequency(tau, sigma, delta, eta, s):
 
 
     Parameters:
+    ----------
         tau (float): Defined as tau = (eta / 5) * (t-t_0), where t_0 is the initial time and t is the time variable. It is a dimensionless time parameter that measures the time to coalescence in units of the symmetric mass ratio eta.
         sigma (float): Reduced spin parameter (m2 * s2 - m1 * s1) / M
         delta (float): Mass difference parameter (m1 - m2) / M
@@ -136,6 +139,7 @@ def frequency(tau, sigma, delta, eta, s):
         s (float): Spin parameter (m1**2 * s1 + m2**2 * s2) / (M**2)
 
     Returns:
+    -------
         F (float): The value of frequency at the given tau, sigma, delta, eta, and s.
     """
 
@@ -200,6 +204,7 @@ def frequency_derivative(tau, sigma, delta, eta, s):
     With respect to t not tau. (Uses Chain rule to get dF/dt from dF/dtau, where tau is a function of t, using dTau/dt = -eta/5).
 
     Parameters:
+    ----------
         tau (float): Defined as tau = (eta / 5) * (t-t_0), where t_0 is the initial time and t is the time variable. It is a dimensionless time parameter that measures the time to coalescence in units of the symmetric mass ratio eta.
         sigma (float): Reduced spin parameter (m2 * s2 - m1 * s1) / M
         delta (float): Mass difference parameter (m1 - m2) / M
@@ -207,6 +212,7 @@ def frequency_derivative(tau, sigma, delta, eta, s):
         s (float): Spin parameter (m1**2 * s1 + m2**2 * s2) / (M**2)
 
     Returns:
+    -------
         dFdt (float): The value of the derivative of frequency with respect to time at the given tau, sigma, delta, eta, and s.
     """
     dFdt = (
@@ -284,6 +290,7 @@ def time_to_merger(x, sigma, delta, eta, s):
     tc(x) = t_0 - t(x) (I think should be the other way around(?))
 
     Parameters:
+    ---------
         x (float): The PN expansion parameter, defined as (pi*M*f)^(2/3), where M is the total mass of the binary and f is the GW frequency.
         sigma (float): Reduced spin parameter (m2 * s2 - m1 * s1) / M
         delta (float): Mass difference parameter (m1 - m2) / M
@@ -291,6 +298,7 @@ def time_to_merger(x, sigma, delta, eta, s):
         s (float): Spin parameter (m1**2 * s1 + m2**2 * s2) / (M**2)
 
     Returns:
+    -------
         tc (float): The value of time to merger at the given x, sigma, delta, eta, and s.
     """
 
@@ -364,6 +372,7 @@ def tau_to_x(tau, sigma, delta, eta, s):
     https://github.com/davidtrestini/PNpedia/blob/275c95c8f6765d5628eeb2549d17250cd16e6617/Core%20post-Newtonian%20quantities/Circular%20orbits/Spinning/Nonprecessing/Without%20tidal%20effects/Waveform/chirp.txt
 
     Parameters:
+    ----------
         tau (float): Defined as tau = (eta / 5) * (t-t_0), where t_0 is the initial time and t is the time variable. It is a dimensionless time parameter that measures the time to coalescence in units of the symmetric mass ratio eta.
         sigma (float): Reduced spin parameter (m2 * s2 - m1 * s1) / M
         delta (float): Mass difference parameter (m1 - m2) / M
@@ -371,6 +380,7 @@ def tau_to_x(tau, sigma, delta, eta, s):
         s (float): Spin parameter (m1**2 * s1 + m2**2 * s2) / (M**2)
 
     Returns:
+    -------
         x (float): The value of the dimensionless frequency at the given tau, sigma, delta, eta, and s.
     """
 
@@ -459,24 +469,78 @@ def tau_to_x(tau, sigma, delta, eta, s):
 
 @njit
 def _get_amplitude(t, f, fdot, parameters):
+    '''
+    Newtonian Amplitude for the (2,2) mode. 
+
+    Note: Amplitude of *h_lm* not h_plus
+
+    See E.g. Eqn 79 of https://arxiv.org/pdf/0710.0614
+
+    Parameters:
+    ----------
+        t (float): Time at which to evaluate the amplitude.
+        f (float): Frequency at which to evaluate the amplitude.
+        fdot (float): Time derivative of the frequency at time t.
+        parameters (array-like): An array containing the parameters of the system, where:
+            parameters[0] (float): Total mass M of the binary system.
+            parameters[1] (float): Symmetric mass ratio eta of the binary system.
+            parameters[3] (float): Distance D to the binary system. 
+
+    Returns:
+        A (float): The amplitude of the (2,2) mode at time t. 
+    '''
     M = parameters[0]
     eta = parameters[1]
     D = parameters[3]
     v = (pi * M * f) ** (1 / 3)
-    A = 2 * eta * M / D * (v) ** 2
+    A = 8*sqrt(pi/5)*eta * M / D * (v) ** 2
     return A
 
 
 @njit
 def _get_hplus_hcross(hlm, parameters):
+    '''
+    Get hplus and hcross from hlm for the (2,2) mode.
+
+    Assume the waveform amplitude is appropriately normalized such that hlm is the amplitude of the (2,2) mode. 
+    Uses the normalised form of the spin-weighted spherical harmonic Y22. 
+
+    Parameters:
+    ----------
+        hlm (float): The amplitude of the (2,2) mode of the waveform.
+        parameters (array-like): An array containing the parameters of the system, where:
+            parameters[2] (float): Cosine of the inclination angle of the binary system.
+
+    Returns:
+        hplus (float): The plus polarization of the gravitational wave.
+        hcross (float): The cross polarization of the gravitational wave.        
+    
+    '''
     cosi = parameters[2]
-    hplus = -hlm * (1 + cosi**2)
-    hcross = -hlm * (2j * cosi)
+    Y22_norm = sqrt(5 / (64 * pi))
+    hplus = -hlm * Y22_norm * (1 + cosi**2)
+    hcross = -hlm * Y22_norm * (2j * cosi)
     return hplus, hcross
 
 
 @njit
 def _get_time_to_coalescence(M, eta, f0, delta, sigma, s):
+    ''''
+    Get time to coalescence from a given starting frequency f0.
+    
+    Parameters:
+    ----------
+        M (float): Total mass of the binary system.
+        eta (float): Symmetric mass ratio of the binary system.
+        f0 (float): Starting frequency from which to calculate the time to coalescence.
+        delta (float): Mass difference parameter (m1 - m2) / M
+        sigma (float): Reduced spin parameter (m2 * s2 - m1 * s1) / M
+        s (float): Spin parameter (m1**2 * s1 + m2**2 * s2) / M
+
+    Returns:
+    ---------
+        tc (float): Time to coalescence from the given starting frequency f0.
+    '''
     x0 = (pi * M * f0) ** (2 / 3)
     tc = time_to_merger(x0, sigma, delta, eta, s) * M
     return tc
@@ -484,6 +548,22 @@ def _get_time_to_coalescence(M, eta, f0, delta, sigma, s):
 
 @njit
 def _get_time_to_coalescence_cpu_wrap(t_coal, parameters):
+    '''
+    CPU-wrapper for time-to-coalescence function. 
+    Loops through each set of parameters and calculates time to merger 
+
+    Parameters:
+    ----------
+        t_coal (array-like): An array to store the calculated time to coalescence (array to be filled in place).
+        parameters (array-like): An array of shape (N, 12) containing the parameters for N different binary systems, where each row corresponds to a binary system and the columns correspond to the parameters in the following order:
+            parameters[i, 0] (float): Total mass M of the binary system.
+            parameters[i, 1] (float): Symmetric mass ratio eta of the binary system
+            parameters[i, 4] (float): Starting frequency f0 from which to calculate the time to coalescence for the i-th binary system.
+            parameters[i, 9] (float): Mass difference parameter delta for the i-th binary system.
+            parameters[i, 10] (float): Reduced spin parameter sigma for the i-th binary system.
+            parameters[i, 11] (float): Spin parameter s for the i-th binary system.
+    
+    '''
     for i in range(len(t_coal)):
         t_coal[i] = _get_time_to_coalescence(
             parameters[i, 0],#M
@@ -496,7 +576,24 @@ def _get_time_to_coalescence_cpu_wrap(t_coal, parameters):
         
 @cuda.jit
 def _get_time_to_coalescence_gpu_wrap(t_coal, parameters):
-    idx = cuda.grid(1)
+    '''
+    GPU-wrapper for time-to-coalescence function.
+    Each thread calculates the time to coalescence for a single set of parameters.
+
+    Parameters:
+    ----------
+        t_coal (array-like): An array to store the calculated time to coalescence (array to be filled in place).
+        parameters (array-like): An array of shape (N, 12) containing the parameters for N different binary systems, where each row corresponds to a binary system and the columns correspond to the parameters in the following order:
+            parameters[i, 0] (float): Total mass M of the binary system.
+            parameters[i, 1] (float): Symmetric mass ratio eta of the binary system
+            parameters[i, 4] (float): Starting frequency f0 from which to calculate the time to coalescence for the i-th binary system.
+            parameters[i, 9] (float): Mass difference parameter delta for the i-th binary system.
+            parameters[i, 10] (float): Reduced spin parameter sigma for the i-th binary system.
+            parameters[i, 11] (float): Spin parameter s for the i-th binary system.
+    
+    '''
+
+    idx = cuda.grid(1) # Working out what index of the array this thread should operate on. 
     if idx < t_coal.size:
         t_coal[idx] = _get_time_to_coalescence(
             parameters[idx, 0],
@@ -510,6 +607,24 @@ def _get_time_to_coalescence_gpu_wrap(t_coal, parameters):
 
 @njit
 def _get_time_to_f(f, tc, M, eta, delta, sigma, s):
+    '''
+    Get time to coalescence from a given frequency f.
+    Uses direct analytical inversion of the frequency function to get time as a function of frequency.
+
+    Parameters:
+    ----------
+        f (float): Frequency.
+        tc (float): Time to coalescence.
+        M (float): Total mass.
+        eta (float): Symmetric mass ratio.
+        delta (float): Mass difference parameter.
+        sigma (float): Reduced spin parameter.
+        s (float): Spin parameter.
+
+    Returns:
+    -------
+        t_to_f (float): Time to coalescence from the given frequency f.
+    '''
     x = (pi * M * f) ** (2 / 3)
     tc_from_f = time_to_merger(x, sigma, delta, eta, s) * M
     return tc - tc_from_f
@@ -517,6 +632,23 @@ def _get_time_to_f(f, tc, M, eta, delta, sigma, s):
 
 @njit
 def _get_time_to_f_cpu_wrap(t_from_f, f, tc, parameters):
+    '''
+    CPU-wrapper for time-from-frequency function.
+    Loops through each set of parameters and calculates time to merger from frequency f.
+    Parameters:
+    ----------
+        t_from_f (array-like): An array to store the calculated time to coalescence
+        f (float): Frequency from which to calculate the time to coalescence.
+        tc (array-like): An array containing the time to coalescence for each set of
+            parameters, where tc[i] corresponds to the time to coalescence for the i-th set of parameters.
+        parameters (array-like): An array of shape (N, 12) containing the parameters for N different binary systems.
+            parameters[i, 0] (float): Total mass M of the binary system.
+            parameters[i, 1] (float): Symmetric mass ratio eta of the binary system
+            parameters[i, 9] (float): Mass difference parameter delta for the i-th binary system.
+            parameters[i, 10] (float): Reduced spin parameter sigma for the i-th binary system.
+            parameters[i, 11] (float): Spin parameter s for the i-th binary system.
+
+    '''
     for i in range(len(t_from_f)):
         t_from_f[i] = _get_time_to_f(
             f,
@@ -531,6 +663,24 @@ def _get_time_to_f_cpu_wrap(t_from_f, f, tc, parameters):
 
 @cuda.jit
 def _get_time_to_f_gpu_wrap(t_to_f, f, tc, parameters):
+    ''''
+    GPU wrapper for time-from-frequency function.
+    Each thread calculates the time to coalescence from frequency f for a single set of parameters
+    Parameters:
+    ----------
+        t_to_f (array-like): An array to store the calculated time to coalescence
+        f (float): Frequency from which to calculate the time to coalescence.
+        tc (array-like): An array containing the time to coalescence for each set of
+            parameters, where tc[i] corresponds to the time to coalescence for the i-th set of parameters.
+        parameters (array-like): An array of shape (N, ) containing the parameters for N different binary systems, where each row corresponds to a binary system and the columns correspond to the parameters in the following order:
+            parameters[i, 0] (float): Total mass M of the binary system.
+            parameters[i, 1] (float): Symmetric mass ratio eta of the binary system
+            parameters[i, 9] (float): Mass difference parameter delta for the i-th binary system.
+            parameters[i, 10] (float): Reduced spin parameter sigma for the i-th binary system.
+            parameters[i, 11] (float): Spin parameter s for the i-th binary system.
+
+
+    '''
     idx = cuda.grid(1)
     if idx < t_to_f.size:
         t_to_f[idx] = _get_time_to_f(
@@ -546,6 +696,28 @@ def _get_time_to_f_gpu_wrap(t_to_f, f, tc, parameters):
 
 @njit
 def _get_phi_f_fdot(t, parameters):
+    '''
+    Get the phase, frequency and frequency derivative at time t for a given set of parameters.
+
+    Parameters:
+    ----------
+        t (float): Time at which to evaluate the phase, frequency and frequency derivative.
+        parameters (array-like): An array containing the parameters of the system, where:
+            parameters[0] (float): Total mass M of the binary system.
+            parameters[1] (float): Symmetric mass ratio eta of the binary system.
+            parameters[7] (float): Coalescence phase of the binary system.
+            parameters[8] (float): Time to coalescence tc of the binary system.
+            parameters[9] (float): Mass difference parameter delta of the binary system.
+            parameters[10] (float): Reduced spin parameter sigma of the binary system.
+            parameters[11] (float): Spin parameter s of the binary system.
+
+    Returns: 
+    --------
+        phi (float): The phase of the gravitational wave at time t.
+        freq (float): The frequency of the gravitational wave at time t.
+        fdot (float): The time derivative of the frequency of the gravitational wave at time t.
+
+    '''
     M = parameters[0]
     eta = parameters[1]
     coalecence_phase = parameters[7]
