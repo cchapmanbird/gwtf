@@ -391,6 +391,7 @@ class AnalyticTimeFrequencyWaveform:
         search_statistic: np.ndarray | None = None,
         N_seg: int | None = None,
         mixed_precision: bool = False,
+        use_midpoint: bool = True,
     ):
         """Evaluate the analytic waveform/inner-product statistic/search statistic.
 
@@ -425,6 +426,9 @@ class AnalyticTimeFrequencyWaveform:
             waveform-level quantities (such as phase, frequency, amplitude), but single precision is used to construct
             the time-frequency representation and compute inner products. This can reduce memory usage and increase speed,
             particularly on GPU, typically with minimal impact on accuracy.
+        use_midpoint : bool, optional
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning. (Default: True)
+            (Should be set to True in almost all cases)
         Returns
         -------
         ndarray
@@ -503,6 +507,7 @@ class AnalyticTimeFrequencyWaveform:
                     out,
                     psds,
                     mixed_precision,
+                    use_midpoint,
                 )
             # Branch: Compute the semi-coherent search-statistic.
             #   NOTE: This branch/option does not return d_h and h_h at a time-segment level
@@ -532,6 +537,7 @@ class AnalyticTimeFrequencyWaveform:
                     psds,
                     N_seg,
                     mixed_precision,
+                    use_midpoint,
                 )
                 # Output is search statistic in this case.
                 out = search_statistic
@@ -556,6 +562,7 @@ class AnalyticTimeFrequencyWaveform:
                 if mixed_precision
                 else xp.zeros(1, dtype=np.float64),
                 mixed_precision,
+                use_midpoint,
             )
 
         return out[0] if single_source else out
