@@ -95,7 +95,7 @@ def analytic_kernel_constructor(
         spacecraft_ltts,
         spacecraft_orbits,
         statistic,
-        psds,
+        inv_psds,
         mixed_precision,
     ):
         '''
@@ -142,8 +142,8 @@ def analytic_kernel_constructor(
             NOTE: Precomputed, not computed in the kernel at runtime.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h) for each time-segment for the given source. 
-        psds: array (nT, nF, n_channels) or None
-            The power spectral density of the noise, used to compute the inner products for the statistics if compute_statistic is True. 
+        inv_psds: array (nT, nF, n_channels) or None
+            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. 
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         '''
@@ -240,12 +240,12 @@ def analytic_kernel_constructor(
                         else:
                             h = h_TT[i]
                         
-                        # If compute_statistic is True, compute the inner products for d_h and h_h using the data in channels and the computed waveform h, and the psd in psds.
+                        # If compute_statistic is True, compute the inner products for d_h and h_h using the data in channels and the computed waveform h, and the inverse psd in inv_psds.
                         if compute_statistic:
                             d = channels[t_idx, f_idx, i]
-                            psd = psds[t_idx, f_idx, i]
-                            d_h += complex_inner_product(d, h, psd, dF_prec)
-                            h_h += complex_inner_product(h, h, psd, dF_prec)
+                            inv_psd = inv_psds[t_idx, f_idx, i]
+                            d_h += complex_inner_product(d, h, inv_psd, dF_prec)
+                            h_h += complex_inner_product(h, h, inv_psd, dF_prec)
                         else:
                             channels[src_num, t_idx, f_idx, i] = h
 
@@ -263,7 +263,7 @@ def analytic_kernel_constructor(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        psds,
+        inv_psds,
         mixed_precision,
     ):
         '''
@@ -293,8 +293,8 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h for each time-segment for the given source. 
-        psds: array (nT, nF, n_channels) or None
-            The power spectral density of the noise, used to compute the inner products for the statistics if compute_statistic is True. 
+        inv_psds: array (nT, nF, n_channels) or None
+            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         '''
@@ -331,7 +331,7 @@ def analytic_kernel_constructor(
                 spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
-                psds,
+                inv_psds,
                 mixed_precision,
             )
 
@@ -345,7 +345,7 @@ def analytic_kernel_constructor(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        psds,
+        inv_psds,
         mixed_precision,
     ):
         '''
@@ -374,8 +374,8 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h for each time-segment for the given source. 
-        psds: array (nT, nF, n_channels) or None
-            The power spectral density of the noise, used to compute the inner products for the statistics if compute_statistic is True. 
+        inv_psds: array (nT, nF, n_channels) or None
+            The reciprocal (1/psd) of the noise PSD. Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         '''
@@ -407,7 +407,7 @@ def analytic_kernel_constructor(
                 spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
-                psds,
+                inv_psds,
                 mixed_precision,
             )
 
