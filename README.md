@@ -1,5 +1,5 @@
 # gwtf
-Waveform generation and likelihood approximations for slowly-evolving GW sources in the time-frequency domain.
+Waveform generation and likelihood approximations for slowly-evolving GW sources in the time-frequency domain in <b>O(10) microseconds</b>.
 
 Usage of waveform generator in an end-to-end parameter estimation provided in the notebook [Parameter_estimation.ipynb](https://github.com/cchapmanbird/gwtf/blob/cleanup_and_document/examples/Parameter_estimation.ipynb)
 
