@@ -1,11 +1,14 @@
 # gwtf
+
+https://app.readthedocs.org/projects/pygwtf/badge/?version=<version>&style=<style>
+
 Waveform generation and likelihood approximations for slowly-evolving GW sources in the time-frequency domain in <b>O(10) microseconds</b>.
 
 Usage of waveform generator in an end-to-end parameter estimation provided in the notebook [Parameter_estimation.ipynb](examples/Parameter_estimation.ipynb)
 
-Currently being used to analyse the stellar-origin binaries in the LISA data-challenge Mojito lite. 
+Currently being used to analyse the stellar-origin binaries in the LISA data-challenge Mojito lite.
 
-Features: 
+Features:
 --------
 - Support both CPU and GPU based computations of both waveforms and likelihoods.
 - Supports inner-product/waveform batching over GPU threads.
@@ -20,5 +23,5 @@ Waveforms Supported:
 
 Contributors
 ---------
-- Christian Chapman-Bird 
+- Christian Chapman-Bird
 - Diganta Bandopadhyay
