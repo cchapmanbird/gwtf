@@ -447,6 +447,7 @@ class AnalyticTimeFrequencyWaveform:
 
         nT = self.config["nT"]
         nF = self.config["nF"]
+        dF = self.config["dF"]
 
     # Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``
         if parameters_response is None:
@@ -482,7 +483,14 @@ class AnalyticTimeFrequencyWaveform:
                     (n_sources, 4), dtype=np.float64
                 )
 
-            # Branch: Compute d_h and h_h per segment. 
+            # Prefold the PSD: pass 1/psd to the kernels so the inner-product inner
+            # loop multiplies instead of dividing (fp64 division is much slower than
+            # multiply on GPU). Computed once here per call rather than per bin.
+
+            # Also multiply by 4*dF here to save cost in the inner-product
+            inv_psds = 1.0 / psds * 4 * dF
+
+            # Branch: Compute d_h and h_h per segment.
             if N_seg is None:
                 # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2). 
                 #   If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).
@@ -505,7 +513,7 @@ class AnalyticTimeFrequencyWaveform:
                     self.spacecraft_orbits,
                     self.spacecraft_ltts,
                     out,
-                    psds,
+                    inv_psds,
                     mixed_precision,
                     use_midpoint,
                 )
@@ -534,7 +542,7 @@ class AnalyticTimeFrequencyWaveform:
                     self.spacecraft_orbits,
                     self.spacecraft_ltts,
                     search_statistic,
-                    psds,
+                    inv_psds,
                     N_seg,
                     mixed_precision,
                     use_midpoint,

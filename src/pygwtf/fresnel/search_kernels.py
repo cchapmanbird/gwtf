@@ -202,7 +202,7 @@ def analytic_kernel_constructor_semi_coherent(
         spacecraft_ltts,
         spacecraft_orbits,
         statistic,
-        psds,
+        inv_psds,
         Nseg,
         mixed_precision,
         use_midpoint,
@@ -256,8 +256,8 @@ def analytic_kernel_constructor_semi_coherent(
             NOTE: Precomputed, not computed in the kernel at runtime.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for the given source.
-        psds: array (nT, nF, n_channels)
-            The power spectral density of the noise, used to compute the inner products for the semi-coherent statistic.
+        inv_psds: array (nT, nF, n_channels)
+            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the semi-coherent statistic.
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
@@ -377,11 +377,11 @@ def analytic_kernel_constructor_semi_coherent(
                         for i in range(channels.shape[-1]):
                             h = h_f_pos * transfer_functions[i]
 
-                            # Extract data and psd for this time-frequency bin and channel, and accumulate the per-tranche statistic.
+                            # Extract data and inverse psd for this time-frequency bin and channel, and accumulate the per-tranche statistic.
                             d = channels[t_idx, f_idx, i]
-                            psd = psds[t_idx, f_idx, i]
-                            d_h += complex_inner_product(d, h, psd, dF_prec)
-                            h_h += complex_inner_product(h, h, psd, dF_prec)
+                            inv_psd = inv_psds[t_idx, f_idx, i]
+                            d_h += complex_inner_product(d, h, inv_psd)
+                            h_h += complex_inner_product(h, h, inv_psd)
 
                 # Add the per-tranche statistics to the per-segment statistic.
                 d_h_seg += d_h
@@ -402,7 +402,7 @@ def analytic_kernel_constructor_semi_coherent(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        psds,
+        inv_psds,
         Nseg,
         mixed_precision,
         use_midpoint,
@@ -433,8 +433,8 @@ def analytic_kernel_constructor_semi_coherent(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for each source.
-        psds: array (nT, nF, n_channels)
-            The power spectral density of the noise, used to compute the inner products for the semi-coherent statistic.
+        inv_psds: array (nT, nF, n_channels)
+            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the semi-coherent statistic.
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
@@ -476,7 +476,7 @@ def analytic_kernel_constructor_semi_coherent(
                 spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
-                psds,
+                inv_psds,
                 Nseg,
                 mixed_precision,
                 use_midpoint,
@@ -492,7 +492,7 @@ def analytic_kernel_constructor_semi_coherent(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        psds,
+        inv_psds,
         Nseg,
         mixed_precision,
         use_midpoint,
@@ -522,8 +522,8 @@ def analytic_kernel_constructor_semi_coherent(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for each source.
-        psds: array (nT, nF, n_channels)
-            The power spectral density of the noise, used to compute the inner products for the semi-coherent statistic.
+        inv_psds: array (nT, nF, n_channels)
+            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. 
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
@@ -557,7 +557,7 @@ def analytic_kernel_constructor_semi_coherent(
                 spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
-                psds,
+                inv_psds,
                 Nseg,
                 mixed_precision,
                 use_midpoint,
