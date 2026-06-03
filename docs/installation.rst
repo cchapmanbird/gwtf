@@ -7,6 +7,9 @@ The ``pygwtf`` package can be installed using pip. To install the latest version
 
    $ python -m pip install pygwtf
 
+Note that for GPU usage, you must also install the ``numba-cuda`` and ``cupy`` packages, which are not included
+in the standard installation requirements definition.
+
 From source
 -------------
 
