@@ -443,6 +443,7 @@ class AnalyticTimeFrequencyWaveform:
 
         nT = self.config["nT"]
         nF = self.config["nF"]
+        dF = self.config["dF"]
 
     # Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``
         if parameters_response is None:
@@ -481,7 +482,9 @@ class AnalyticTimeFrequencyWaveform:
             # Prefold the PSD: pass 1/psd to the kernels so the inner-product inner
             # loop multiplies instead of dividing (fp64 division is much slower than
             # multiply on GPU). Computed once here per call rather than per bin.
-            inv_psds = 1.0 / psds
+
+            # Also multiply by 4*dF here to save cost in the inner-product
+            inv_psds = 1.0 / psds * 4 * dF
 
             # Branch: Compute d_h and h_h per segment.
             if N_seg is None:

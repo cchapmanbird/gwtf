@@ -372,8 +372,8 @@ def analytic_kernel_constructor_semi_coherent(
                             # Extract data and inverse psd for this time-frequency bin and channel, and accumulate the per-tranche statistic.
                             d = channels[t_idx, f_idx, i]
                             inv_psd = inv_psds[t_idx, f_idx, i]
-                            d_h += complex_inner_product(d, h, inv_psd, dF_prec)
-                            h_h += complex_inner_product(h, h, inv_psd, dF_prec)
+                            d_h += complex_inner_product(d, h, inv_psd)
+                            h_h += complex_inner_product(h, h, inv_psd)
 
                 # Add the per-tranche statistics to the per-segment statistic.
                 d_h_seg += d_h

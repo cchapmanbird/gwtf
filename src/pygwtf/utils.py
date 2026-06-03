@@ -2,10 +2,12 @@ from numba import jit
 
 
 @jit
-def complex_inner_product(h1, h2, inv_psd, df):
+def complex_inner_product(h1, h2, inv_psd):
     ''''
     Usual noise-weighted inner product between two time-series in the frequency domain.
     Base of every statistic.
+
+    NOTE: Assumes inv_psd is 1/psd* 4*df. 
 
     Parameters
     ----------
@@ -17,13 +19,10 @@ def complex_inner_product(h1, h2, inv_psd, df):
         Reciprocal (1/psd) of the power spectral density of the noise. Prefolded
         outside the kernel so the inner loop multiplies instead of dividing
         (fp64 division is far slower than multiply on GPU).
-    df : float or float
-        Frequency resolution of the time-series.
-
     Returns
     -------
     array_like or float
         Noise-weighted inner product of the two time-series.
 
     '''
-    return 4 * df * h1.conjugate() * h2 * inv_psd
+    return h1.conjugate() * h2 * inv_psd

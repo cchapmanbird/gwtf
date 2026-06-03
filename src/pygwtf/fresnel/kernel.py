@@ -244,8 +244,8 @@ def analytic_kernel_constructor(
                         if compute_statistic:
                             d = channels[t_idx, f_idx, i]
                             inv_psd = inv_psds[t_idx, f_idx, i]
-                            d_h += complex_inner_product(d, h, inv_psd, dF_prec)
-                            h_h += complex_inner_product(h, h, inv_psd, dF_prec)
+                            d_h += complex_inner_product(d, h, inv_psd)
+                            h_h += complex_inner_product(h, h, inv_psd)
                         else:
                             channels[src_num, t_idx, f_idx, i] = h
 
