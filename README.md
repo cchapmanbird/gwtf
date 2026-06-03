@@ -1,6 +1,6 @@
 # gwtf
 
-[![Documentation Status](https://app.readthedocs.org/projects/pygwtf/badge/?version=stable)](https://pygwtf.readthedocs.io/en/stable/)
+[![Documentation Status](https://app.readthedocs.org/projects/pygwtf/badge/?version=stable)](https://pygwtf.readthedocs.io/en/stable/) [![DOI](https://zenodo.org/badge/1118152669.svg)](https://doi.org/10.5281/zenodo.20531363)
 
 Waveform generation and likelihood approximations for slowly-evolving GW sources in the time-frequency domain in <b>O(10) microseconds</b>.
 
