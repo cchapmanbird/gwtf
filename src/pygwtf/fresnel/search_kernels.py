@@ -205,6 +205,7 @@ def analytic_kernel_constructor_semi_coherent(
         psds,
         Nseg,
         mixed_precision,
+        use_midpoint,
     ):
         '''
         NOTE: HARDWARE AGNOSTIC
@@ -261,6 +262,9 @@ def analytic_kernel_constructor_semi_coherent(
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        use_midpoint : bool
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
+            (Should be set to True in almost all circumstances)
         '''
         # Mixed precision operations to save memory and speed up if desired.
         if mixed_precision:
@@ -304,6 +308,9 @@ def analytic_kernel_constructor_semi_coherent(
                     + t_idx_in_seg
                 )
                 t_tranche = dT_prec * t_idx
+                # If use_midpoint is True, evaluate the mode parameters at the midpoint of the segment, rather than the beginning.
+                if use_midpoint:
+                    t_tranche += dT_prec / 2
 
                 phi0_mode, f0_mode, fdot_mode = _get_phi_f_fdot(
                     t_tranche, params_source
@@ -363,6 +370,7 @@ def analytic_kernel_constructor_semi_coherent(
                             f0_mode,
                             fdot_mode,
                             dT_prec,
+                            use_midpoint,
                         )
 
                         # Generate AET channels via multiplicative, frequency-domain transfer function.
@@ -397,6 +405,7 @@ def analytic_kernel_constructor_semi_coherent(
         psds,
         Nseg,
         mixed_precision,
+        use_midpoint,
     ):
         '''
         Wrapper for the semi-coherent Fresnel_kernel to launch on GPU.
@@ -430,6 +439,9 @@ def analytic_kernel_constructor_semi_coherent(
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        use_midpoint : bool
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
+            (Should be set to True in almost all circumstances)
         '''
         # one source per thread
         src_num = (
@@ -467,6 +479,7 @@ def analytic_kernel_constructor_semi_coherent(
                 psds,
                 Nseg,
                 mixed_precision,
+                use_midpoint,
             )
 
     @jit
@@ -482,6 +495,7 @@ def analytic_kernel_constructor_semi_coherent(
         psds,
         Nseg,
         mixed_precision,
+        use_midpoint,
     ):
         '''
         Wrapper for the semi-coherent Fresnel_kernel to launch on CPU.
@@ -514,6 +528,9 @@ def analytic_kernel_constructor_semi_coherent(
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        use_midpoint : bool
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
+            (Should be set to True in almost all circumstances)
         '''
         for src_num in range(parameters.shape[0]):
             params_source = np.zeros(nparams, dtype=parameters.dtype)
@@ -543,6 +560,7 @@ def analytic_kernel_constructor_semi_coherent(
                 psds,
                 Nseg,
                 mixed_precision,
+                use_midpoint,
             )
 
     return kernel_cpu, kernel_gpu

@@ -48,7 +48,8 @@ def _fresnel(x):
 
 
 @jit
-def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T):
+def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T,
+                    use_midpoint):
     """
     Box-car window fresnel waveform kernel. 
 
@@ -57,15 +58,17 @@ def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T):
     f_bin: float
         The frequency at the centre of the bin being evaluated.
     amp_mode: float
-        The amplitude of the mode being evaluated, evaluated at the beginning of the segment. 
+        The amplitude of the mode being evaluated.
     phase_mode: float
-        The phase of the mode being evaluated, evaluated at the beginning of the segment.
+        The phase of the mode being evaluated.
     f_mode: float
-        The frequency of the mode being evaluated, evaluated at the beginning of the segment.
+        The frequency of the mode being evaluated.
     fdot_mode: float
-        The frequency derivative of the mode being evaluated, evaluated at the beginning of the segment.
+        The frequency derivative of the mode being evaluated.
     T: float
         The duration of the segment being evaluated.
+    use_midpoint: bool
+        Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
 
     Returns:
     -------
@@ -77,10 +80,16 @@ def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T):
     prefac = amp_mode / rt2fdot
 
     delta_f_norm = (f_mode - f_bin) / fdot_mode
-    phase_fac = exp(1j * (phase_mode - pi * fdot_mode * (delta_f_norm**2)))
 
-    v0_C = rt2fdot * delta_f_norm
-    vT_C = rt2fdot * (T + delta_f_norm)
+    if use_midpoint:
+        phase_fac = exp(1j * (phase_mode - pi * fdot_mode * (delta_f_norm**2) -2*pi*f_bin*T/2)) # The extra phase factor at the end accounts for the fact that the mode parameters are evaluated at the midpoint of the segment, rather than the beginning.
+        # The arguments to the Fresnel integrals are also shifted by T/2 to account for this.
+        v0_C = rt2fdot * (-T/2 + delta_f_norm)
+        vT_C = rt2fdot * (T/2 + delta_f_norm)
+    else: 
+        phase_fac = exp(1j * (phase_mode - pi * fdot_mode * (delta_f_norm**2)))
+        v0_C = rt2fdot * delta_f_norm
+        vT_C = rt2fdot * (T + delta_f_norm)
 
     S0, C0 = _fresnel(v0_C)
     ST, CT = _fresnel(vT_C)

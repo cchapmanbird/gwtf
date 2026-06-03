@@ -15,7 +15,7 @@ def analytic_kernel_constructor(
     _get_channels: Callable,
     compute_statistic: bool = False,
     tdi_type: int | None = None,
-    ):  
+):  
     '''
     Constructor method used to generate a kernel function for computing Fresnel waveforms and derived inner-product statistics (d_h and h_h).
 
@@ -97,6 +97,7 @@ def analytic_kernel_constructor(
         statistic,
         psds,
         mixed_precision,
+        use_midpoint, 
     ):
         '''
         NOTE: HARDWARE AGNOSTIC 
@@ -146,6 +147,9 @@ def analytic_kernel_constructor(
             The power spectral density of the noise, used to compute the inner products for the statistics if compute_statistic is True. 
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        use_midpoint : bool
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
+            (Should be set to True in almost all circumstances)
         '''
         # Grab parameters for specified source. 
         for i in range(nparams):
@@ -172,6 +176,10 @@ def analytic_kernel_constructor(
             segment_start_inds[src_num], segment_end_inds[src_num] + 1
         ):
             t_tranche = dT * t_idx
+            # If use_midpoint is True, evaluate the mode parameters at the midpoint of the segment, rather than the beginning.
+
+            if use_midpoint: 
+                t_tranche += dT / 2
 
             phi0_mode, f0_mode, fdot_mode = _get_phi_f_fdot(
                 t_tranche, params_source
@@ -228,6 +236,7 @@ def analytic_kernel_constructor(
                         f0_mode,
                         fdot_mode,
                         dT_prec,
+                        use_midpoint,
                     )
                     # Generate just the polarizations
                     if not tdi:
@@ -265,6 +274,7 @@ def analytic_kernel_constructor(
         statistic,
         psds,
         mixed_precision,
+        use_midpoint,
     ):
         '''
         Wrapper for the Fresnel_kernel to launch on GPU. 
@@ -297,6 +307,9 @@ def analytic_kernel_constructor(
             The power spectral density of the noise, used to compute the inner products for the statistics if compute_statistic is True. 
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        use_midpoint : bool
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
+            (Should be set to True in almost all circumstances)
         '''
         # one source per thread
         src_num = (
@@ -333,6 +346,7 @@ def analytic_kernel_constructor(
                 statistic,
                 psds,
                 mixed_precision,
+                use_midpoint
             )
 
     @jit
@@ -347,6 +361,7 @@ def analytic_kernel_constructor(
         statistic,
         psds,
         mixed_precision,
+        use_midpoint,
     ):
         '''
         Wrapper for the Fresnel_kernel to launch on CPU. 
@@ -378,6 +393,9 @@ def analytic_kernel_constructor(
             The power spectral density of the noise, used to compute the inner products for the statistics if compute_statistic is True. 
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        use_midpoint : bool
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
+            (Should be set to True in almost all circumstances)
         '''
 
         for src_num in range(parameters.shape[0]):
@@ -409,6 +427,7 @@ def analytic_kernel_constructor(
                 statistic,
                 psds,
                 mixed_precision,
+                use_midpoint
             )
 
     return kernel_cpu, kernel_gpu
