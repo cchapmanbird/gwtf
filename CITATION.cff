@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Chapman-Bird"
+  given-names: "Christian"
+  orcid: "https://orcid.org/0000-0002-2728-9612"
+- family-names: "Bandopadhyay"
+  given-names: "Diganta"
+  orcid: "https://orcid.org/0000-0003-0975-5613"
+title: "pygwtf: Gravitational waves in the time-frequency domain"
+version: 1.0.2
+doi: 10.5281/zenodo.20531363
+date-released: 2026-06-03
+url: "https://github.com/cchapmanbird/gwtf"
