@@ -33,13 +33,27 @@ def _fresnel(x):
     sinpix2 = sin(halfpix2)
 
     if ax < 6:
-        fx = (1 + 0.926 * ax) / (2 + 1.792 * ax + 3.104 * ax**2)
-        gx = 1 / (2 + 4.142 * ax + 3.492 * ax**2 + 6.67 * ax**3)
+        # Below is the clean (slow) implementation 
+
+        # fx = (1 + 0.926 * ax) / (2 + 1.792 * ax + 3.104 * ax**2)
+        # gx = 1 / (2 + 4.142 * ax + 3.492 * ax**2 + 6.67 * ax**3)
+
+        # Below is the fast (but less clean) implementation (avoids repeated float *division*).
+        f_denom =  (2 + 1.792 * ax + 3.104 * ax**2)
+        g_denom =  (2 + 4.142 * ax + 3.492 * ax**2 + 6.67 * ax**3)
+
+        combined_reciprocal = 1.0/(f_denom * g_denom)
+
+        fx = (1 + 0.926 * ax) * combined_reciprocal * g_denom
+        gx = combined_reciprocal * f_denom
+
         Sx_approx = 0.5 - fx * cospix2 - gx * sinpix2
         Cx_approx = 0.5 + fx * sinpix2 - gx * cospix2
     else:
-        Sx_approx = 0.5 - cospix2 / pix
-        Cx_approx = 0.5 + sinpix2 / pix
+        one_over_pix = 1 / pix
+        
+        Sx_approx = 0.5 - cospix2 * one_over_pix
+        Cx_approx = 0.5 + sinpix2 * one_over_pix
 
     if x < 0:
         return -Sx_approx, -Cx_approx
@@ -48,7 +62,7 @@ def _fresnel(x):
 
 
 @jit
-def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T,
+def _fresnel_kernel(f_bin, amp_mode_prefactor, sqrt2fdot, phase_mode, f_mode, fdot_mode, one_over_fdot, T,
                     use_midpoint):
     """
     Box-car window fresnel waveform kernel. 
@@ -57,14 +71,18 @@ def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T,
     ----------
     f_bin: float
         The frequency at the centre of the bin being evaluated.
-    amp_mode: float
-        The amplitude of the mode being evaluated.
+    amp_mode_prefactor: float
+        The amplitude/sqrt(2 * fdot_mode) of the mode being evaluated.
+    sqrt2fdot: float
+        The square root of 2 times the frequency derivative of the mode being evaluated.
     phase_mode: float
         The phase of the mode being evaluated.
     f_mode: float
         The frequency of the mode being evaluated.
     fdot_mode: float
         The frequency derivative of the mode being evaluated.
+    one_over_fdot: float
+        The inverse of the frequency derivative of the mode being evaluated.
     T: float
         The duration of the segment being evaluated.
     use_midpoint: bool
@@ -75,24 +93,24 @@ def _fresnel_kernel(f_bin, amp_mode, phase_mode, f_mode, fdot_mode, T,
     fct: complex
         The Fresnel waveform for the given mode, within a time-segment. Evaluated at f_bin. 
     """
-    rt2fdot = sqrt(2 * fdot_mode)
+    # rt2fdot = sqrt(2 * fdot_mode)
 
-    prefac = amp_mode / rt2fdot
+    # prefac = amp_mode_prefactor
 
-    delta_f_norm = (f_mode - f_bin) / fdot_mode
+    delta_f_norm = (f_mode - f_bin) * one_over_fdot 
 
     if use_midpoint:
         phase_fac = exp(1j * (phase_mode - pi * fdot_mode * (delta_f_norm**2) -2*pi*f_bin*T/2)) # The extra phase factor at the end accounts for the fact that the mode parameters are evaluated at the midpoint of the segment, rather than the beginning.
         # The arguments to the Fresnel integrals are also shifted by T/2 to account for this.
-        v0_C = rt2fdot * (-T/2 + delta_f_norm)
-        vT_C = rt2fdot * (T/2 + delta_f_norm)
+        v0_C = sqrt2fdot * (-T/2 + delta_f_norm)
+        vT_C = sqrt2fdot * (T/2 + delta_f_norm)
     else: 
         phase_fac = exp(1j * (phase_mode - pi * fdot_mode * (delta_f_norm**2)))
-        v0_C = rt2fdot * delta_f_norm
-        vT_C = rt2fdot * (T + delta_f_norm)
+        v0_C = sqrt2fdot * delta_f_norm
+        vT_C = sqrt2fdot * (T + delta_f_norm)
 
     S0, C0 = _fresnel(v0_C)
     ST, CT = _fresnel(vT_C)
 
-    fct = prefac * phase_fac * (CT - C0 + 1j * (ST - S0))
+    fct = amp_mode_prefactor * phase_fac * (CT - C0 + 1j * (ST - S0))
     return fct

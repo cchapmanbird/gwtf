@@ -1,3 +1,4 @@
+from math import sqrt
 from typing import Callable
 
 import numpy as np
@@ -355,6 +356,12 @@ def analytic_kernel_constructor_semi_coherent(
                 # Cheap way to check how many extra frequency bins to compute over for the given fdot.
                 extra_fdot_bins = int((fdot_mode * dT) / dF)
 
+                # Fresnel quantities (common to all frequency bins for a given source at a given time-segment)
+                # NOTE: math.sqrt, not np.sqrt -- numpy scalar ufuncs are not supported inside CUDA kernels by this numba version.
+                sqrt2fdot = sqrt(2 * fdot_mode)
+                amp_mode_prefac = amp_mode / sqrt2fdot
+                one_over_fdot = 1 / fdot_mode
+
                 # For each frequency bin within the time-segment, compute the fresnel.
                 for f_rel_idx in range(
                     -kernel_width, kernel_width + extra_fdot_bins + 1
@@ -365,10 +372,12 @@ def analytic_kernel_constructor_semi_coherent(
 
                         h_f_pos = _fresnel_kernel(
                             f_bin,
-                            amp_mode,
+                            amp_mode_prefac,
+                            sqrt2fdot,
                             phi0_mode,
                             f0_mode,
                             fdot_mode,
+                            one_over_fdot,
                             dT_prec,
                             use_midpoint,
                         )
