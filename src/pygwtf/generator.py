@@ -9,7 +9,7 @@ from .models.base import AnalyticModel
 from .response.orbits import get_analytic_ltts, get_analytic_orbits
 from .response.transfer import get_AET_TFs
 
-# Number of threads per block for GPU kernels, common choice. 
+# Number of threads per block for GPU kernels, common choice.
 THREADS_PER_BLOCK = 128
 
 
@@ -62,6 +62,7 @@ class AnalyticTimeFrequencyWaveform:
         psds: np.ndarray | None = None,
         spacecraft_orbits: np.ndarray | None = None,
         spacecraft_ltts: np.ndarray | None = None,
+        block_vectorised_gpu: bool = False,
     ):
         self.backend = (
             get_backend(backend) if isinstance(backend, str) else backend
@@ -83,14 +84,16 @@ class AnalyticTimeFrequencyWaveform:
             self.backend.xp.arange(self.config["nT"]) * self.config["dT"]
         )
 
-        # Note: includes the f=0 DC bin. 
+        # Note: includes the f=0 DC bin.
         self.f_tranche = (
             self.backend.xp.arange(self.config["nF"]) * self.config["dF"]
         )
 
         self.tdi_type = tdi_type
 
-        assert self.tdi_type== 2 or self.tdi_type is None, "Only TDI-2 generation is currently supported. Set tdi_type to 2 or None."
+        assert self.tdi_type == 2 or self.tdi_type is None, (
+            "Only TDI-2 generation is currently supported. Set tdi_type to 2 or None."
+        )
 
         # If TDI type is not specified, do not compute TDI channels, instead go for the h_plus/h_cross polarisations.
         if self.tdi_type is None:
@@ -101,7 +104,7 @@ class AnalyticTimeFrequencyWaveform:
             spacecraft_orbits = self.backend.xp.zeros(
                 (self.config["nT"], 3, 3), dtype=np.float64
             )
-        
+
         # TDI case
         else:
             # Only TDI-2 now.
@@ -122,15 +125,19 @@ class AnalyticTimeFrequencyWaveform:
 
         self.spacecraft_orbits = spacecraft_orbits
 
-        if spacecraft_ltts is None: # in *metres*
+        if spacecraft_ltts is None:  # in *metres*
             print(
                 "Spacecraft light travel times not supplied. Falling back to analytic calculation"
             )
             spacecraft_ltts = self.backend.xp.asarray(
-                get_analytic_ltts(self.backend.asnumpy(self.spacecraft_orbits)) # computed in metres
+                get_analytic_ltts(
+                    self.backend.asnumpy(self.spacecraft_orbits)
+                )  # computed in metres
             )
         else:
-            spacecraft_ltts = self.backend.xp.asarray(spacecraft_ltts)# in metres
+            spacecraft_ltts = self.backend.xp.asarray(
+                spacecraft_ltts
+            )  # in metres
             assert spacecraft_ltts.shape == (self.config["nT"], 3), (
                 f"Spacecraft light travel times array must have shape {(self.config['nT'], 3)}"
             )
@@ -150,31 +157,33 @@ class AnalyticTimeFrequencyWaveform:
             channel_fn,
         )
 
-        # Construct waveform kernels, these are used to return the h_plys/h_cross or TDI channels for given parameters. 
+        # Construct waveform kernels, these are used to return the h_plys/h_cross or TDI channels for given parameters.
         self.waveform_kernel_cpu, self.waveform_kernel_gpu = (
-            analytic_kernel_constructor(  
+            analytic_kernel_constructor(
                 *constructor_args,
                 compute_statistic=False,
                 tdi_type=tdi_type,
+                block_vectorised_gpu=block_vectorised_gpu,
             )
         )
 
         # Construct inner-product kernels, these are the kernels used for the statistic evaluation, and to build search statistics/likelhoods.
-        # Note that the statistic kernel does not return the waveform and vice-versa. 
+        # Note that the statistic kernel does not return the waveform and vice-versa.
         self.statistic_kernel_cpu, self.statistic_kernel_gpu = (
-            analytic_kernel_constructor(  
+            analytic_kernel_constructor(
                 *constructor_args,
                 compute_statistic=True,
                 tdi_type=tdi_type,
+                block_vectorised_gpu=block_vectorised_gpu,
             )
         )
 
         # Construct direct semi-coherent statistic kernels that write one value per source.
-        # 'Special' kernels used to do do the sobbh search. 
+        # 'Special' kernels used to do do the sobbh search.
         (
             self.semi_coherent_statistic_kernel_cpu,
             self.semi_coherent_statistic_kernel_gpu,
-        ) = analytic_kernel_constructor_semi_coherent(*constructor_args) 
+        ) = analytic_kernel_constructor_semi_coherent(*constructor_args)
 
         self._param_cache = None
 
@@ -202,11 +211,13 @@ class AnalyticTimeFrequencyWaveform:
 
         self.psds = psds
 
+        self.block_vectorised_gpu = block_vectorised_gpu
+
     def waveform_kernel(self, n_sources, *args):
         """Call waveform kernel for the selected backend.
 
-        NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays. 
-        
+        NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays.
+
         Parameters
         ----------
         n_sources : int
@@ -219,15 +230,27 @@ class AnalyticTimeFrequencyWaveform:
             ## bpg: Blocks per grid
             ## Effectively ceil(n_sources / THREADS_PER_BLOCK) but written without needing to import math.ceil.
             # Ensures we have enough blocks (each with THREADS_PER_BLOCK threads) to cover all sources, even if n_sources is not a multiple of THREADS_PER_BLOCK.
-            bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
-            self.waveform_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
+
+            if self.block_vectorised_gpu:
+                # 2-d grids of blocks and threads
+                # - Each block processes one source in one time segment
+                # - Each thread processes one frequency bin for that configuration
+                bpg = (n_sources, (self.config["nT"] + 8 - 1) // 8)
+                tpb = (32, 8)
+            else:
+                # One thread per source
+                bpg = (
+                    n_sources + (THREADS_PER_BLOCK - 1)
+                ) // THREADS_PER_BLOCK
+                tpb = THREADS_PER_BLOCK
+            self.waveform_kernel_gpu[bpg, tpb](*args)
         else:
             self.waveform_kernel_cpu(*args)
 
     def statistic_kernel(self, n_sources, *args):
         """Active statistic kernel for the selected backend.
            Only returns the per-segment d_h and h_h values.
-        
+
         NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays.
 
         Parameters
@@ -236,18 +259,29 @@ class AnalyticTimeFrequencyWaveform:
             Number of sources to process, used to determine GPU grid size if applicable.
         *args : tuple
             Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing.
-            See the kernel construction functions for details on the expected arguments.    
+            See the kernel construction functions for details on the expected arguments.
         """
         if self.backend.uses_gpu:
-            bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
-            self.statistic_kernel_gpu[bpg, THREADS_PER_BLOCK](*args)
+            if self.block_vectorised_gpu:
+                # 2-d grids of blocks and threads
+                # - Each block processes one source in one time segment
+                # - Each thread processes one frequency bin for that configuration
+                bpg = (n_sources, (self.config["nT"] + 8 - 1) // 8)
+                tpb = (32, 8)
+            else:
+                # One thread per source
+                bpg = (
+                    n_sources + (THREADS_PER_BLOCK - 1)
+                ) // THREADS_PER_BLOCK
+                tpb = THREADS_PER_BLOCK
+            self.statistic_kernel_gpu[bpg, tpb](*args)
         else:
             self.statistic_kernel_cpu(*args)
 
     def semi_coherent_statistic_kernel(self, n_sources, *args):
         """Active direct semi-coherent statistic kernel for the selected backend.
            Returns the final semi-coherent statistic value per source, after summing over segments internally in the kernel.
-           NOTE: Only really used for the SoBBH search 
+           NOTE: Only really used for the SoBBH search
 
         Parameters
         ----------
@@ -270,7 +304,7 @@ class AnalyticTimeFrequencyWaveform:
         parameters: dict | np.ndarray,
     ) -> tuple[np.ndarray, bool]:
         """Copy parameters into the internal cache, realloc if source count changes.
-        Internal cache is helpful as filling in an array is cheaper than reallocating array, specially on GPU. 
+        Internal cache is helpful as filling in an array is cheaper than reallocating array, specially on GPU.
 
         Parameters
         ----------
@@ -334,13 +368,13 @@ class AnalyticTimeFrequencyWaveform:
         """
         Derive per-source time-segment indices from the model's time bounds.
 
-        Used for computing the time-index range the source is in the LISA band for each source in nsources, 
-        
+        Used for computing the time-index range the source is in the LISA band for each source in nsources,
+
         Parameters
         ----------
         parameters_cache : ndarray, shape (n_sources, n_params + n_derived)
             The parameters with derived parameters filled in.
-        
+
         """
         xp = self.backend.xp
         nT = self.config["nT"]
@@ -349,9 +383,9 @@ class AnalyticTimeFrequencyWaveform:
         nF = self.config["nF"]
         frequency_band = (dF, nF * dF)
 
-        # Fill in segment start and end indices based on the model's time bounds for the given parameters and frequency band. 
+        # Fill in segment start and end indices based on the model's time bounds for the given parameters and frequency band.
         #   If no bounds are returned, default to the full segment.
-        #   Used to work out which time-segments the statistics/waveforms should actually be computed for. 
+        #   Used to work out which time-segments the statistics/waveforms should actually be computed for.
         bounds = self.model.get_time_bounds(parameters_cache, frequency_band)
 
         if bounds is None:
@@ -449,11 +483,10 @@ class AnalyticTimeFrequencyWaveform:
         nF = self.config["nF"]
         dF = self.config["dF"]
 
-    # Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``
+        # Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``
         if parameters_response is None:
-            
             if self.tdi_type is None:
-                # These variables are still required for the evaluation, so fill them in as dummy empty arrays. 
+                # These variables are still required for the evaluation, so fill them in as dummy empty arrays.
                 parameters_response = xp.zeros(
                     (n_sources, 4), dtype=np.float64
                 )
@@ -466,7 +499,7 @@ class AnalyticTimeFrequencyWaveform:
                 f"parameters_response must have shape {(n_sources, 4)}"
             )
 
-        # Branch: Compute either d_h and h_h per segment, or the semi-coherent search statistics. 
+        # Branch: Compute either d_h and h_h per segment, or the semi-coherent search statistics.
         if compute_statistic:
             if channels is None:
                 channels = self.channels
@@ -492,7 +525,7 @@ class AnalyticTimeFrequencyWaveform:
 
             # Branch: Compute d_h and h_h per segment.
             if N_seg is None:
-                # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2). 
+                # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2).
                 #   If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).
                 if out is None:
                     # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
@@ -501,8 +534,8 @@ class AnalyticTimeFrequencyWaveform:
                 else:
                     # If output array is supplied, zero it as a safety measure to ensure no uninitialised values are used.
                     out.fill(0.0)
-                
-                # Statistic kernel is responsible for computing waveforms->response->TDI->inner-products->statistics. 
+
+                # Statistic kernel is responsible for computing waveforms->response->TDI->inner-products->statistics.
                 self.statistic_kernel(
                     n_sources,
                     channels,
@@ -519,7 +552,7 @@ class AnalyticTimeFrequencyWaveform:
                 )
             # Branch: Compute the semi-coherent search-statistic.
             #   NOTE: This branch/option does not return d_h and h_h at a time-segment level
-            #   It returns the direct summed semi-coherent statistic for the whole signal evalution for each source. 
+            #   It returns the direct summed semi-coherent statistic for the whole signal evalution for each source.
             else:
                 # If search_statistic output array is not supplied, allocate an array to store the semi-coherent search statistic (upsilon) with shape (n_sources,).
                 if search_statistic is None:
