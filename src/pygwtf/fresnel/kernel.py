@@ -529,7 +529,7 @@ def analytic_kernel_constructor(
                 one_over_fdot = 1 / fdot_mode
 
                 # NOTE: no extra fdot bins here due to block form
-                if freq_ind > 0 or freq_ind < nF:
+                if freq_ind > 0 and freq_ind < nF:
                     f_bin = (freq_ind + 1) * (dF)
                     h_f_pos = _fresnel_kernel(
                         f_bin,
