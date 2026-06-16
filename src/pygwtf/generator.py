@@ -845,7 +845,7 @@ class MultipleHarmonicTimeFrequencyWaveform:
         xp = self.backend.xp
 
         segment_start_inds = xp.zeros(
-            phase_amp_information.shape[0] * phase_amp_information.shape[1],
+            phase_amp_information.shape[0],
             dtype=np.int32,
         )
 
@@ -986,7 +986,9 @@ class MultipleHarmonicTimeFrequencyWaveform:
             if out is None:
                 # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
                 # This array will be filled in by the kernel
-                out = xp.zeros((n_sources, nT, 2), dtype=out_dtype)
+                out = xp.zeros(
+                    (n_sources, modes_per_source, nT, 2), dtype=out_dtype
+                )
             else:
                 # If output array is supplied, zero it as a safety measure to ensure no uninitialised values are used.
                 out.fill(0.0)
