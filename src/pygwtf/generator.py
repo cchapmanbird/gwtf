@@ -49,6 +49,10 @@ class AnalyticTimeFrequencyWaveform:
         Pre-computed spacecraft light travel times array of shape ``(nT, 3)``.
         Required for TDI generation if not supplied at initialisation, in which case will be calculated analytically from positions
         (Need in metre units not seconds)
+    block_vectorised_gpu : bool, optional
+        Whether to use a block-vectorised GPU kernel, where each block processes one source in one time segment,
+        and each thread processes one frequency bin for that configuration. This can improve performance for small
+        numbers of sources, but may be slower for large numbers of sources. Default is False.
     """
 
     def __init__(
