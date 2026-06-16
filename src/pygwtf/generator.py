@@ -235,8 +235,10 @@ class AnalyticTimeFrequencyWaveform:
                 # 2-d grids of blocks and threads
                 # - Each block processes one source in one time segment
                 # - Each thread processes one frequency bin for that configuration
-                bpg = (n_sources, (self.config["nT"] + 8 - 1) // 8)
-                tpb = (32, 8)
+                # bpg = (n_sources, (self.config["nT"] + 8 - 1) // 8)
+                # tpb = (32, 8)
+                bpg = (n_sources, self.config["nT"])
+                tpb = (32, 1)
             else:
                 # One thread per source
                 bpg = (
@@ -266,8 +268,10 @@ class AnalyticTimeFrequencyWaveform:
                 # 2-d grids of blocks and threads
                 # - Each block processes one source in one time segment
                 # - Each thread processes one frequency bin for that configuration
-                bpg = (n_sources, (self.config["nT"] + 8 - 1) // 8)
-                tpb = (32, 8)
+                # bpg = (n_sources, (self.config["nT"] + 8 - 1) // 8)
+                # tpb = (32, 8)
+                bpg = (n_sources, self.config["nT"])
+                tpb = (32, 1)
             else:
                 # One thread per source
                 bpg = (

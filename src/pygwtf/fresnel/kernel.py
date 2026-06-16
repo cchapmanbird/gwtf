@@ -64,9 +64,9 @@ def analytic_kernel_constructor(
     kernel_width = config["kernel_width"]
     nparams = config["nparams"]
 
-    if block_vectorised_gpu and kernel_width != 32:
+    if block_vectorised_gpu and kernel_width != 16:
         raise ValueError(
-            f"Block vectorised GPU kernel requires kernel_width=32 for now, but got kernel_width={kernel_width}."
+            f"Block vectorised GPU kernel requires kernel_width=16 for now, but got kernel_width={kernel_width}."
         )
 
     # Only TDI-2 supported for now.
@@ -237,7 +237,8 @@ def analytic_kernel_constructor(
 
             # For each frequeny bin within the time-segment, compute the fresnel.
             for f_rel_idx in range(
-                -kernel_width, kernel_width + extra_fdot_bins + 1
+                -kernel_width,
+                kernel_width + extra_fdot_bins,  # + 1
             ):
                 f_idx = start_ind + f_rel_idx
                 if f_idx > 0 and f_idx < nF:
@@ -464,7 +465,7 @@ def analytic_kernel_constructor(
         if src_num < parameters.shape[0]:
             if (
                 t_idx >= segment_start_inds[src_num]
-                and t_idx < segment_end_inds[src_num]
+                and t_idx <= segment_end_inds[src_num]
             ):
                 params_source = cuda.shared.array(nparams, dtype=np.float64)
                 P_lm = cuda.local.array((3, 3), dtype=np.complex128)
@@ -479,18 +480,19 @@ def analytic_kernel_constructor(
                 # multi-thread load of parameters
                 if f_idx < nparams and cuda.threadIdx.y == 0:
                     params_source[f_idx] = parameters[src_num, f_idx]
-                    if tdi:
-                        # Grab response parameters for specified source if TDI response computation is needed.
-                        for i in range(4):
-                            params_source_response[i] = parameters_response[
-                                src_num, i
-                            ]
-
-                        # Fill in P_lm tensor and wavevector k for TDI response computation for this source.
-                        fill_P_lm(P_lm, params_source_response)
-                        fill_k(k, params_source_response)
 
                 cuda.syncthreads()
+
+                if tdi:
+                    # Grab response parameters for specified source if TDI response computation is needed.
+                    for i in range(4):
+                        params_source_response[i] = parameters_response[
+                            src_num, i
+                        ]
+
+                    # Fill in P_lm tensor and wavevector k for TDI response computation for this source.
+                    fill_P_lm(P_lm, params_source_response)
+                    fill_k(k, params_source_response)
 
                 t_tranche = dT * t_idx
                 # If use_midpoint is True, evaluate the mode parameters at the midpoint of the segment, rather than the beginning.
@@ -553,32 +555,45 @@ def analytic_kernel_constructor(
 
                         # If compute_statistic is True, compute the inner products for d_h and h_h using the data in channels and the computed waveform h, and the inverse psd in inv_psds.
                         if compute_statistic:
-                            d = channels[t_idx, f_idx, i]
-                            inv_psd = inv_psds[t_idx, f_idx, i]
+                            d = channels[t_idx, freq_ind, i]
+                            inv_psd = inv_psds[t_idx, freq_ind, i]
                             d_h_here += complex_inner_product(d, h, inv_psd)
                             h_h_here += complex_inner_product(h, h, inv_psd)
                         else:
-                            channels[src_num, t_idx, f_idx, i] = h
+                            channels[src_num, t_idx, freq_ind, i] = h
 
                 if compute_statistic:
-                    partial = d_h_here.real - 0.5 * h_h_here.real
-
-                    cuda.syncthreads()
-
                     # TODO: not restrict to 32 bins
-                    reduce = cuda.shared.array(32, dtype=np.float64)
-                    reduce[cuda.threadIdx.x] = partial
+                    reduce = cuda.shared.array(32, dtype=np.complex128)
+
+                    # # d_h
+                    cuda.syncthreads()
+                    reduce[f_idx] = d_h_here
+                    # print("Value at f_idx, d_h_here:", f_idx, d_h_here.real, d_h_here.imag, reduce[f_idx].real, reduce[f_idx].imag)
+                    cuda.syncthreads()  # ensure all threads have written before reducing
 
                     stride = cuda.blockDim.x // 2
                     while stride > 0:
-                        if cuda.threadIdx.x < stride:
-                            reduce[cuda.threadIdx.x] += reduce[
-                                cuda.threadIdx.x + stride
-                            ]
-                        cuda.syncthreads()
+                        if f_idx < stride:
+                            reduce[f_idx] += reduce[f_idx + stride]
+                        cuda.syncthreads()  # sync after EVERY stride step
                         stride //= 2
 
-                    statistic[src_num, t_idx] = reduce[0]
+                    statistic[src_num, t_idx, 0] = reduce[0]
+
+                    # h_h
+                    cuda.syncthreads()
+                    reduce[f_idx] = h_h_here
+                    cuda.syncthreads()  # ensure all threads have written before reducing
+
+                    stride = cuda.blockDim.x // 2
+                    while stride > 0:
+                        if f_idx < stride:
+                            reduce[f_idx] += reduce[f_idx + stride]
+                        cuda.syncthreads()  # sync after EVERY stride step
+                        stride //= 2
+
+                    statistic[src_num, t_idx, 1] = reduce[0]
 
         cuda.syncthreads()
 
