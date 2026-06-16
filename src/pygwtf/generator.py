@@ -3,7 +3,10 @@ from typing import Type
 import numpy as np
 
 from .backend import Backend, get_backend
-from .fresnel.kernel import analytic_kernel_constructor
+from .fresnel.kernel import (
+    analytic_kernel_constructor,
+    multimode_direct_kernel_constructor,
+)
 from .fresnel.search_kernels import analytic_kernel_constructor_semi_coherent
 from .models.base import AnalyticModel
 from .response.orbits import get_analytic_ltts, get_analytic_orbits
@@ -603,6 +606,421 @@ class AnalyticTimeFrequencyWaveform:
                 segment_start_inds,
                 segment_end_inds,
                 params,
+                parameters_response,
+                self.spacecraft_orbits,
+                self.spacecraft_ltts,
+                xp.zeros(1, dtype=out_dtype),
+                xp.zeros(1, dtype=np.float32)
+                if mixed_precision
+                else xp.zeros(1, dtype=np.float64),
+                mixed_precision,
+                use_midpoint,
+            )
+
+        return out[0] if single_source else out
+
+
+class MultipleHarmonicTimeFrequencyWaveform:
+    """
+    Time-frequency waveform generator for multiple harmonics.
+
+
+
+    """
+
+    def __init__(
+        self,
+        config: dict,
+        prescription: str = "fresnel",
+        backend: str | Backend = "cpu",
+        tdi_type: int | None = None,
+        channels: np.ndarray | None = None,
+        psds: np.ndarray | None = None,
+        spacecraft_orbits: np.ndarray | None = None,
+        spacecraft_ltts: np.ndarray | None = None,
+    ):
+        self.backend = (
+            get_backend(backend) if isinstance(backend, str) else backend
+        )
+        self.config = config
+        self.config["nT"] = int(self.config["nT"])
+        self.config["nF"] = int(self.config["nF"])
+        self.config["dT"] = float(self.config["dT"])
+        self.config["dF"] = float(self.config["dF"])
+        assert np.all(
+            [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
+        ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
+
+        self.config["dt"] = 1 / (self.config["nF"] * self.config["dF"])
+
+        # Setting up time and frequency grid used by the kernels.
+        self.t_tranche = (
+            self.backend.xp.arange(self.config["nT"]) * self.config["dT"]
+        )
+
+        # Note: includes the f=0 DC bin.
+        self.f_tranche = (
+            self.backend.xp.arange(self.config["nF"]) * self.config["dF"]
+        )
+
+        self.tdi_type = tdi_type
+
+        assert self.tdi_type == 2 or self.tdi_type is None, (
+            "Only TDI-2 generation is currently supported. Set tdi_type to 2 or None."
+        )
+
+        # If TDI type is not specified, do not compute TDI channels, instead go for the h_plus/h_cross polarisations.
+        if self.tdi_type is None:
+
+            def channel_fn(x):
+                return x
+
+            self.n_channels = 2
+
+            # Fill in dummy orbits for non-TDI generation, as the kernel expects an array of this shape regardless.
+            spacecraft_orbits = self.backend.xp.zeros(
+                (self.config["nT"], 3, 3), dtype=np.float64
+            )
+
+        # TDI case
+        else:
+            # Only TDI-2 now.
+            channel_fn = get_AET_TFs
+            self.n_channels = 3
+            if spacecraft_orbits is None:
+                print(
+                    "Spacecraft orbits not supplied. Falling back to analytic orbits"
+                )
+                spacecraft_orbits = self.backend.xp.asarray(
+                    get_analytic_orbits(self.backend.asnumpy(self.t_tranche))
+                )
+            else:
+                spacecraft_orbits = self.backend.xp.asarray(spacecraft_orbits)
+                assert spacecraft_orbits.shape == (self.config["nT"], 3, 3), (
+                    f"Spacecraft orbits array must have shape {(self.config['nT'], 3, 3)}"
+                )
+
+        self.spacecraft_orbits = spacecraft_orbits
+
+        if spacecraft_ltts is None:  # in *metres*
+            print(
+                "Spacecraft light travel times not supplied. Falling back to analytic calculation"
+            )
+            spacecraft_ltts = self.backend.xp.asarray(
+                get_analytic_ltts(
+                    self.backend.asnumpy(self.spacecraft_orbits)
+                )  # computed in metres
+            )
+        else:
+            spacecraft_ltts = self.backend.xp.asarray(
+                spacecraft_ltts
+            )  # in metres
+            assert spacecraft_ltts.shape == (self.config["nT"], 3), (
+                f"Spacecraft light travel times array must have shape {(self.config['nT'], 3)}"
+            )
+
+        self.spacecraft_ltts = spacecraft_ltts
+
+        kernel_config = {
+            **self.config,
+        }
+
+        constructor_args = (
+            kernel_config,
+            channel_fn,
+        )
+
+        # Construct waveform kernels, these are used to return the h_plys/h_cross or TDI channels for given parameters.
+        self.waveform_kernel_cpu, self.waveform_kernel_gpu = (
+            multimode_direct_kernel_constructor(
+                *constructor_args,
+                compute_statistic=False,
+                tdi_type=tdi_type,
+            )
+        )
+
+        # Construct inner-product kernels, these are the kernels used for the statistic evaluation, and to build search statistics/likelhoods.
+        # Note that the statistic kernel does not return the waveform and vice-versa.
+        self.statistic_kernel_cpu, self.statistic_kernel_gpu = (
+            multimode_direct_kernel_constructor(
+                *constructor_args,
+                compute_statistic=True,
+                tdi_type=tdi_type,
+            )
+        )
+
+        self._param_cache = None
+
+        # Corresponds to the 'data' array against which inner-products are computed. Can be left as None if only waveform generation is desired.
+        if channels is not None:
+            assert channels.shape == (
+                self.config["nT"],
+                self.config["nF"],
+                self.n_channels,
+            ), (
+                f"Channels array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
+            )
+
+        self.channels = channels
+
+        # Corresponds to the PSD array used for inner-product/statistic computation. Can be left as None if only waveform generation is desired.
+        if psds is not None:
+            assert psds.shape == (
+                self.config["nT"],
+                self.config["nF"],
+                self.n_channels,
+            ), (
+                f"PSDs array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
+            )
+
+        self.psds = psds
+
+    def waveform_kernel(self, n_sources, modes_per_source, *args):
+        """Call waveform kernel for the selected backend.
+
+        NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays.
+
+        Parameters
+        ----------
+        n_sources : int
+            Number of sources to process, used to determine GPU grid size if applicable.
+        modes_per_source : int
+            Number of modes per source, used to determine GPU grid size if applicable.
+        *args : tuple
+            Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing.
+            See the kernel construction functions for details on the expected arguments.
+        """
+        if self.backend.uses_gpu:
+            ## bpg: Blocks per grid
+            ## Effectively ceil(n_sources / THREADS_PER_BLOCK) but written without needing to import math.ceil.
+            # Ensures we have enough blocks (each with THREADS_PER_BLOCK threads) to cover all sources, even if n_sources is not a multiple of THREADS_PER_BLOCK.
+
+            # One thread per mode per source
+            bpg = (
+                int(n_sources * modes_per_source) + (THREADS_PER_BLOCK - 1)
+            ) // THREADS_PER_BLOCK
+            tpb = THREADS_PER_BLOCK
+            self.waveform_kernel_gpu[bpg, tpb](*args)
+        else:
+            self.waveform_kernel_cpu(*args)
+
+    def statistic_kernel(self, n_sources, modes_per_source, *args):
+        """Active statistic kernel for the selected backend.
+           Only returns the per-segment d_h and h_h values.
+
+        NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays.
+
+        Parameters
+        ----------
+        n_sources : int
+            Number of sources to process, used to determine GPU grid size if applicable.
+        modes_per_source : int
+            Number of modes per source, used to determine GPU grid size if applicable.
+        *args : tuple
+            Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing.
+            See the kernel construction functions for details on the expected arguments.
+        """
+        if self.backend.uses_gpu:
+            # One thread per source
+            bpg = (
+                int(n_sources * modes_per_source) + (THREADS_PER_BLOCK - 1)
+            ) // THREADS_PER_BLOCK
+            tpb = THREADS_PER_BLOCK
+            self.statistic_kernel_gpu[bpg, tpb](*args)
+        else:
+            self.statistic_kernel_cpu(*args)
+
+    def _compute_segment_indices(self, phase_amp_information):
+        """
+        Derive per-source time-segment indices from the model's time bounds.
+
+        Used for computing the time-index range the source is in the LISA band for each source in nsources,
+
+        Parameters
+        ----------
+        phase_amp_information : ndarray, shape (n_sources, n_modes, nT,  4)
+            Array containing phase and amplitude information for each mode of each source.
+
+        """
+        xp = self.backend.xp
+
+        segment_start_inds = xp.zeros(
+            phase_amp_information.shape[0] * phase_amp_information.shape[1],
+            dtype=np.int32,
+        )
+
+        single_mode_amp_per_source = phase_amp_information[:, 0, :, 0]
+
+        segment_end_inds = xp.argmax(
+            xp.isnan(single_mode_amp_per_source)
+            | xp.isinf(single_mode_amp_per_source),
+            axis=1,
+        )
+
+        # If no NaNs or infs are found, set the end index to the last valid index (nT).
+        segment_end_inds[segment_end_inds == 0] = (
+            phase_amp_information.shape[2] - 1
+        )
+
+        return segment_start_inds, segment_end_inds
+
+    def __call__(
+        self,
+        phase_amp_information: np.ndarray,
+        channels: np.ndarray | None = None,
+        psds: np.ndarray | None = None,
+        parameters_response: np.ndarray | None = None,
+        out: np.ndarray | None = None,
+        compute_statistic: bool = False,
+        search_statistic: np.ndarray | None = None,
+        N_seg: int | None = None,
+        mixed_precision: bool = False,
+        use_midpoint: bool = True,
+    ):
+        """Evaluate the analytic waveform/inner-product statistic/search statistic.
+
+        Parameters
+        ----------
+        phase_amp_information : array_like, shape (n_sources, n_modes, nT, 4)
+            Array containing phase and amplitude information for each mode of each source.
+        channels : array_like or None
+            Data array of shape ``(nT, nF, n_channels)``.
+        psds : array_like, optional
+            Power spectral densities, shape ``(nT, nF, n_channels)``.
+            Required for statistic output. If not supplied
+            will use the stored psds from initialisation.
+        parameters_response : array_like, shape (n_sources, 4), optional
+            Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``.
+            Required when using TDI.
+        out : array_like or None
+            *Waveform output*: pre-allocated output of shape
+            ``(n_sources, nT, nF, n_channels)``; auto-allocated if ``None``.
+            *Statistic output*: pre-allocated output of shape ``(n_sources, nT, 2)``.
+            Auto-allocated if ``None``.
+        compute_statistic : bool, optional
+            Return the inner-product statistics instead of the channels array.
+            NOTE: Not search statistic values but the per-segment d_h and h_h values. If ``True``, requires PSDs and channels to be supplied either at call time or initialisation.
+        search_statistic : ndarray or None
+            If not None, the output array to store the final semi-coherent search statistic (upsilon) after summing over segments. Must be of shape (n_sources,). Ignored if ``N_seg`` is None.
+        N_seg : int, optional
+            If not None, the number of segments to divide the data into for statistic computation.
+            Ignored if ``compute_statistic=False``.
+        mixed_precision : bool, optional
+            If True, compute the statistic in mixed precision. The precision of the inputs is maintanied to compute
+            waveform-level quantities (such as phase, frequency, amplitude), but single precision is used to construct
+            the time-frequency representation and compute inner products. This can reduce memory usage and increase speed,
+            particularly on GPU, typically with minimal impact on accuracy.
+        use_midpoint : bool, optional
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning. (Default: True)
+            (Should be set to True in almost all cases)
+        Returns
+        -------
+        ndarray
+            out ``(n_sources, nT, nF, n_channels)`` when
+            ``return_statistic=False``, or statistic ``(n_sources, nT, 2)``
+            when ``return_statistic=True``.
+        """
+        xp = self.backend.xp
+
+        if phase_amp_information.ndim == 3:
+            single_source = True
+            phase_amp_information = phase_amp_information[None, ...]
+        else:
+            single_source = False
+
+        n_sources = phase_amp_information.shape[0]
+        modes_per_source = phase_amp_information.shape[1]
+
+        segment_start_inds, segment_end_inds = self._compute_segment_indices(
+            phase_amp_information
+        )
+        out_dtype = np.complex64 if mixed_precision else np.complex128
+
+        nT = self.config["nT"]
+        nF = self.config["nF"]
+        dF = self.config["dF"]
+
+        # Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``
+        if parameters_response is None:
+            if self.tdi_type is None:
+                # These variables are still required for the evaluation, so fill them in as dummy empty arrays.
+                parameters_response = xp.zeros(
+                    (n_sources, 4), dtype=np.float64
+                )
+            else:
+                raise ValueError(
+                    "parameters_response must be supplied for TDI generation."
+                )
+        else:
+            assert parameters_response.shape == (n_sources, 4), (
+                f"parameters_response must have shape {(n_sources, 4)}"
+            )
+
+        # Branch: Compute either d_h and h_h per segment, or the semi-coherent search statistics.
+        if compute_statistic:
+            if channels is None:
+                channels = self.channels
+                assert channels is not None, (
+                    "Channels must be supplied to compute the statistic."
+                )
+            if psds is None:
+                psds = self.psds
+                assert psds is not None, (
+                    "PSDs must be supplied to compute the statistic."
+                )
+            if parameters_response is None:
+                parameters_response = xp.zeros(
+                    (n_sources, 4), dtype=np.float64
+                )
+
+            # Prefold the PSD: pass 1/psd to the kernels so the inner-product inner
+            # loop multiplies instead of dividing (fp64 division is much slower than
+            # multiply on GPU). Computed once here per call rather than per bin.
+
+            # Also multiply by 4*dF here to save cost in the inner-product
+            inv_psds = 1.0 / psds * 4 * dF
+
+            # Branch: Compute d_h and h_h per segment.
+            # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2).
+            #   If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).
+            if out is None:
+                # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
+                # This array will be filled in by the kernel
+                out = xp.zeros((n_sources, nT, 2), dtype=out_dtype)
+            else:
+                # If output array is supplied, zero it as a safety measure to ensure no uninitialised values are used.
+                out.fill(0.0)
+
+            # Statistic kernel is responsible for computing waveforms->response->TDI->inner-products->statistics.
+            self.statistic_kernel(
+                n_sources,
+                modes_per_source,
+                channels,
+                segment_start_inds,
+                segment_end_inds,
+                phase_amp_information,
+                parameters_response,
+                self.spacecraft_orbits,
+                self.spacecraft_ltts,
+                out,
+                inv_psds,
+                mixed_precision,
+                use_midpoint,
+            )
+
+        # Branch: Compute waveforms/TDI channels. No statistic computation.
+        else:
+            if out is None:
+                out = xp.zeros(
+                    (n_sources, nT, nF, self.n_channels), dtype=out_dtype
+                )
+            self.waveform_kernel(
+                n_sources,
+                modes_per_source,
+                out,
+                segment_start_inds,
+                segment_end_inds,
+                phase_amp_information,
                 parameters_response,
                 self.spacecraft_orbits,
                 self.spacecraft_ltts,
