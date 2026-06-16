@@ -459,17 +459,71 @@ def analytic_kernel_constructor(
         mixed_precision,
         use_midpoint,
     ):
+        """
+        Block-vectorised variant of kernel_gpu, intended for smaller source batches.
+       
+        Thread layout:
+            - src_num = blockIdx.x: one source per block.
+            - t_idx = blockIdx.y * blockDim.y + threadIdx.y: one thread per time-segment (the blockIdx.y
+              term lets the time-segment range span more than a single block's worth of y-threads).
+            - f_idx = threadIdx.x: one thread per frequency bin, spanning kernel_width bins either side
+              of the central frequency (freq_ind = int(f0 / dF) + f_idx - kernel_width).
+
+        Parameters:
+        ----------
+        channels: array (n_sources, nT, nF, n_channels)
+            Either the array to be filled in with the computed waveforms for each time-segment and frequency bin (if compute_statistic is False)
+            Or the data array to be used to compute statistics (d_h and h_h) if compute_statistic is True.
+        segment_start_inds: array (n_sources,)
+            The starting time-segment index for each source. Used to determine which time-segments to compute over for the given source.
+        segment_end_inds: array (n_sources,)
+            The ending time-segment index for each source. Used to determine which time-segments to compute over for the given source.
+        parameters: array (n_sources, nparams)
+            The parameters describing each source. This is used to compute the waveform for the given source.
+        parameters_response: array (n_sources, 4) or None
+            The parameters describing the response for each source, used if tdi is True. This is used to compute the TDI response for the given source.
+        spacecraft_orbits: array (nT, 3, 3) or None
+            Spacecraft orbits, used for TDI response computation if tdi is True.
+            Used to fill in the p array within the kernel for TDI response computation.
+            NOTE: Precomputed, not computed in the kernel at runtime.
+        spacecraft_ltts: array (nT, 3) or None
+            Light travel times for each spacecraft, used for TDI response computation if tdi is True
+            Used to fill in the Ls array within the kernel for TDI response computation.
+        statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
+            Array to store the computed statistics: [..., 0] holds d_h and [..., 1] holds h_h for each time-segment of the given source.
+        inv_psds: array (nT, nF, n_channels) or None
+            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the statistics if compute_statistic is True.
+        mixed_precision: bool 
+            NOTE this is not currently implemented for the block-vectorised kernel.
+            Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
+        use_midpoint : bool
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
+            (Should be set to True in almost all circumstances)
+
+        Notes:
+        -----
+        Requires kernel_width == 16 (enforced in analytic_kernel_constructor), so blockDim.x == 32 and the
+        shared reduce buffer is sized to 32. The reduction assumes blockDim.x is a power of two.
+        """
+
         src_num = cuda.blockIdx.x  # one source per block
+        # 2D block
+        # Distributes one thread per time-segment for the given source across the y-dimension of the block.
         t_idx = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y
+        # one thread per frequency bin across the x-dimension of the block.
         f_idx = cuda.threadIdx.x
+        
         if src_num < parameters.shape[0]:
             if (
                 t_idx >= segment_start_inds[src_num]
                 and t_idx <= segment_end_inds[src_num]
             ):
+                # All threads in the block will share the same parameters
                 params_source = cuda.shared.array(nparams, dtype=np.float64)
                 P_lm = cuda.local.array((3, 3), dtype=np.complex128)
                 k = cuda.local.array((3,), dtype=parameters_response.dtype)
+                
+                # Following are local parameters, as they are per-time-segment, so per y thread in the block. So cannot be in shared arrays. 
                 n = cuda.local.array((3, 3), dtype=parameters_response.dtype)
                 p = cuda.local.array((3, 3), dtype=spacecraft_orbits.dtype)
                 Ls = cuda.local.array((3,), dtype=spacecraft_ltts.dtype)
@@ -478,11 +532,18 @@ def analytic_kernel_constructor(
                 )
 
                 # multi-thread load of parameters
+                # cuda.threadIdx.y == 0 ensures only load paramaeters for one source at the very beginning (cuda.threadIdx.y = t_idx = 0 ensures this). 
+                # f_idx < nparams: f_idx is acting as an iterator to load in the parameters, 
+                #       i.e each thread in the x-dimension (frequency) of the block is initially responsible for populating the local params_source_array.
+                # NOTE: Unlikely to ever happen but if by chance the number of frequency threads (kernel_width) is less than nparams this will crash/cause problems. 
                 if f_idx < nparams and cuda.threadIdx.y == 0:
                     params_source[f_idx] = parameters[src_num, f_idx]
 
+                # * Block * i.e. source level synchronization here. 
+                #   Ensure all the parameters are loaded for the source by synchronizing all threads in the block before any thread can access the params_source array.
                 cuda.syncthreads()
 
+                # Grabbing response parameters outside of frequency loop
                 if tdi:
                     # Grab response parameters for specified source if TDI response computation is needed.
                     for i in range(4):
@@ -563,24 +624,43 @@ def analytic_kernel_constructor(
                             channels[src_num, t_idx, freq_ind, i] = h
 
                 if compute_statistic:
+
+                    # This section is efficiently reducing the d_h and h_h contributions from each frequency thread in the block 
+                    #   to compute the total d_h and h_h for the given source and time-segment, using shared memory for the reduction.
+
                     # TODO: not restrict to 32 bins
                     reduce = cuda.shared.array(32, dtype=np.complex128)
 
                     # # d_h
                     cuda.syncthreads()
+
+                    # This has dimensionality cuda.blockDim.x, which is the number of frequency threads in the block (kernel_width*2)
                     reduce[f_idx] = d_h_here
-                    # print("Value at f_idx, d_h_here:", f_idx, d_h_here.real, d_h_here.imag, reduce[f_idx].real, reduce[f_idx].imag)
+
                     cuda.syncthreads()  # ensure all threads have written before reducing
 
+                    # Two cuda_syncthreads() calls per stride step is necessary to prevent race conditions, 
+                    #   as threads need to wait for each other to finish writing their values to the reduce array before any thread can read those values for the reduction step.
+
+                    # Stride here is just the number of frequency bins (threads) either side of the central frequency. 
+                    
+                    # Use of stride: 
+                    #    Each thread in the first half of the block (f_idx < stride) adds the value from its corresponding thread in the second half of the block (f_idx + stride) to its own value.
+                    #    Essentially pairs up frequencies on either side of the central frequency and adds their contributions together,
+                    #    halving the number of threads contributing to the reduction at each step. Then does it repeatedly. (32-->16-->8-->4-->2-->1) 
+                    #    Reduces the total number of sums to log2(cuda.blockDim.x) steps. In the case of kernel_width=16, this means 5 steps (see above). 
                     stride = cuda.blockDim.x // 2
                     while stride > 0:
                         if f_idx < stride:
                             reduce[f_idx] += reduce[f_idx + stride]
-                        cuda.syncthreads()  # sync after EVERY stride step
+                        # sync after EVERY stride step. Ensures that all threads have completed their addition for the current stride before any thread can proceed to the next step of the reduction
+                        cuda.syncthreads()  
                         stride //= 2
 
+                    # Because of the "recursive halving" nature of the reduction, final reduced value is in reduce[0]
                     statistic[src_num, t_idx, 0] = reduce[0]
 
+                    # Same reduction for h_h as for d_h, but now the reduce array is being reused to store the h_h contributions from each frequency thread.
                     # h_h
                     cuda.syncthreads()
                     reduce[f_idx] = h_h_here

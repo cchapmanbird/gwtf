@@ -231,16 +231,10 @@ class AnalyticTimeFrequencyWaveform:
             See the kernel construction functions for details on the expected arguments.
         """
         if self.backend.uses_gpu:
-            ## bpg: Blocks per grid
-            ## Effectively ceil(n_sources / THREADS_PER_BLOCK) but written without needing to import math.ceil.
-            # Ensures we have enough blocks (each with THREADS_PER_BLOCK threads) to cover all sources, even if n_sources is not a multiple of THREADS_PER_BLOCK.
-
             if self.block_vectorised_gpu:
                 # 2-d grids of blocks and threads
                 # - Each block processes one source in one time segment
                 # - Each thread processes one frequency bin for that configuration
-                # bpg = (n_sources, (self.config["nT"] + 8 - 1) // 8)
-                # tpb = (32, 8)
                 bpg = (n_sources, self.config["nT"])
                 tpb = (32, 1)
             else:
@@ -272,8 +266,6 @@ class AnalyticTimeFrequencyWaveform:
                 # 2-d grids of blocks and threads
                 # - Each block processes one source in one time segment
                 # - Each thread processes one frequency bin for that configuration
-                # bpg = (n_sources, (self.config["nT"] + 8 - 1) // 8)
-                # tpb = (32, 8)
                 bpg = (n_sources, self.config["nT"])
                 tpb = (32, 1)
             else:
