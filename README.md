@@ -25,3 +25,17 @@ Contributors
 ---------
 - Christian Chapman-Bird
 - Diganta Bandopadhyay
+
+If you use ``pygwtf`` in your work, please consider citing both the software [doi](10.5281/zenodo.20531363) and the associated publication
+
+```bibtex
+@article{Bandopadhyay:2025fyx,
+    author = "Bandopadhyay, Diganta and Chapman-Bird, Christian E. A. and Vecchio, Alberto",
+    title = "{Global time-frequency search for stellar-mass binary black holes in LISA}",
+    eprint = "2510.19047",
+    archivePrefix = "arXiv",
+    primaryClass = "gr-qc",
+    month = "10",
+    year = "2025"
+}
+```
