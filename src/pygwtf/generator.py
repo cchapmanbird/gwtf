@@ -81,6 +81,9 @@ class AnalyticTimeFrequencyWaveform:
             [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
 
+        if block_vectorised_gpu:
+            assert backend == "gpu", "Block vectorised GPU kernels can only be used with GPU backend."
+
         self.config["dt"] = 1 / (self.config["nF"] * self.config["dF"])
 
         # Setting up time and frequency grid used by the kernels.
