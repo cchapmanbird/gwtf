@@ -851,14 +851,17 @@ class MultipleHarmonicTimeFrequencyWaveform:
 
         single_mode_amp_per_source = phase_amp_information[:, 0, :, 0]
 
-        segment_end_inds = xp.argmax(
-            xp.isnan(single_mode_amp_per_source)
-            | xp.isinf(single_mode_amp_per_source),
-            axis=1,
+        segment_end_inds = (
+            xp.argmax(
+                xp.isnan(single_mode_amp_per_source)
+                | xp.isinf(single_mode_amp_per_source),
+                axis=1,
+            )
+            - 1
         )
 
         # If no NaNs or infs are found, set the end index to the last valid index (nT).
-        segment_end_inds[segment_end_inds == 0] = (
+        segment_end_inds[segment_end_inds == -1] = (
             phase_amp_information.shape[2] - 1
         )
 
@@ -867,6 +870,7 @@ class MultipleHarmonicTimeFrequencyWaveform:
     def __call__(
         self,
         phase_amp_information: np.ndarray,
+        y_lms: np.ndarray,
         channels: np.ndarray | None = None,
         psds: np.ndarray | None = None,
         parameters_response: np.ndarray | None = None,
@@ -883,6 +887,11 @@ class MultipleHarmonicTimeFrequencyWaveform:
         ----------
         phase_amp_information : array_like, shape (n_sources, n_modes, nT, 4)
             Array containing phase and amplitude information for each mode of each source.
+        y_lms: array_like, shape (n_sources, n_modes, 2)
+            The spin-weighted spherical harmonic values for each mode in each source.
+            First element is the positive-m component, second element is the negative-m component. For m = 0,
+            each component should be halved, so that the sum of the two components is equal to the m=0 component.
+            The negative component should include symmetry-related prefactors e.g. (-1)^l.
         channels : array_like or None
             Data array of shape ``(nT, nF, n_channels)``.
         psds : array_like, optional
@@ -923,8 +932,12 @@ class MultipleHarmonicTimeFrequencyWaveform:
         xp = self.backend.xp
 
         if phase_amp_information.ndim == 3:
+            assert y_lms.ndim == 2, (
+                "y_lms must be a 2-D array of shape (n_modes, 2) when phase_amp_information is a 3-D array of shape (n_modes, nT, 4)"
+            )
             single_source = True
             phase_amp_information = phase_amp_information[None, ...]
+            y_lms = y_lms[None, ...]
         else:
             single_source = False
 
@@ -1001,6 +1014,7 @@ class MultipleHarmonicTimeFrequencyWaveform:
                 segment_start_inds,
                 segment_end_inds,
                 phase_amp_information,
+                y_lms,
                 parameters_response,
                 self.spacecraft_orbits,
                 self.spacecraft_ltts,
@@ -1023,6 +1037,7 @@ class MultipleHarmonicTimeFrequencyWaveform:
                 segment_start_inds,
                 segment_end_inds,
                 phase_amp_information,
+                y_lms,
                 parameters_response,
                 self.spacecraft_orbits,
                 self.spacecraft_ltts,

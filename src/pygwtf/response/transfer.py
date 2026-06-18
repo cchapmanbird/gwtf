@@ -44,81 +44,16 @@ def fill_P_lm(P_lm, parameters):
                 [3] ecliptic_lat: ecliptic latitude of the source
     """
     cosi = parameters[0]
-    pol = parameters[1]
-    ecliptic_long = parameters[2]
-    ecliptic_lat = parameters[3]
-
     Y_lm_22, Y_lm_2minus2 = Ylms(cosi, 0.0)
-
-    cl = cos(ecliptic_long)
-    c2l = cos(2 * ecliptic_long)
-    s2l = sin(2 * ecliptic_long)
-    cl2 = cl * cl
-    sl = sin(ecliptic_long)
-    sl2 = sl * sl
-
-    cb = cos(ecliptic_lat)
-    cb2 = cb * cb
-    sb = sin(ecliptic_lat)
-    sb2 = sb * sb
-
-    cbsl = cb * sl
-    cbsbsl = cbsl * sb
-
-    cbcl = cb * cl
-    cbclsb = cbcl * sb
-
-    clslprod = cl * (1 + sb2) * sl
-
-    Pp00 = cl2 * sb2 - sl2
-    Pp01 = clslprod
-    Pp02 = -cbclsb
-    Pp10 = clslprod
-    Pp11 = -cl2 + sb2 * sl2
-    Pp12 = -cbsbsl
-    Pp20 = -cbclsb
-    Pp21 = -cbsbsl
-    Pp22 = cb2
-
-    Pc00 = sb * s2l
-    Pc01 = -c2l * sb
-    Pc02 = -cbsl
-    Pc10 = -c2l * sb
-    Pc11 = -2 * cl * sb * sl
-    Pc12 = cbcl
-    Pc20 = -cbsl
-    Pc21 = cbcl
-    Pc22 = 0
-
-    expn = exp(-2j * pol)
-
-    part = expn * (Pp00 + 1j * Pc00)
-    P_lm[0, 0] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
-    part = expn * (Pp01 + 1j * Pc01)
-    P_lm[0, 1] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
-    part = expn * (Pp02 + 1j * Pc02)
-    P_lm[0, 2] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
-    part = expn * (Pp10 + 1j * Pc10)
-    P_lm[1, 0] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
-    part = expn * (Pp11 + 1j * Pc11)
-    P_lm[1, 1] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
-    part = expn * (Pp12 + 1j * Pc12)
-    P_lm[1, 2] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
-    part = expn * (Pp20 + 1j * Pc20)
-    P_lm[2, 0] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
-    part = expn * (Pp21 + 1j * Pc21)
-    P_lm[2, 1] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
-    part = expn * (Pp22 + 1j * Pc22)
-    P_lm[2, 2] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
+    return fill_P_lm_given_Y_lm(P_lm, parameters, Y_lm_22, Y_lm_2minus2)
 
 
 @njit
-def fill_P_0_simple(P_lm, parameters):
+def fill_P_lm_given_Y_lm(P_lm, parameters, Y_lm_pos, Y_lm_neg):
     """
     Polarization matrices from Eqn 16. in https://arxiv.org/pdf/2003.00357
 
-    Here only the positive component is used and no Ylms are included, for use
-    with kernels that have Ylms already included in the mode amplitudes.
+    Takes custom Y_lm for more flexible implementations.
 
     Parameters:
     ----------
@@ -129,6 +64,10 @@ def fill_P_0_simple(P_lm, parameters):
                 [1] pol: polarization angle of the source (angle between the line of sight and the major axis of the binary's orbit)
                 [2] ecliptic_long: ecliptic longitude of the source
                 [3] ecliptic_lat: ecliptic latitude of the source
+    Y_lm_pos: complex
+        The positive-m spherical harmonic value for the signal.
+    Y_lm_neg: complex
+        The negative-m spherical harmonic value for the signal.
     """
     pol = parameters[1]
     ecliptic_long = parameters[2]
@@ -174,17 +113,26 @@ def fill_P_0_simple(P_lm, parameters):
     Pc21 = cbcl
     Pc22 = 0
 
-    expn = exp(-2j * pol)
+    expn = exp(-2j * pol) / 2
 
-    P_lm[0, 0] = 0.5 * expn * (Pp00 + 1j * Pc00)
-    P_lm[0, 1] = 0.5 * expn * (Pp01 + 1j * Pc01)
-    P_lm[0, 2] = 0.5 * expn * (Pp02 + 1j * Pc02)
-    P_lm[1, 0] = 0.5 * expn * (Pp10 + 1j * Pc10)
-    P_lm[1, 1] = 0.5 * expn * (Pp11 + 1j * Pc11)
-    P_lm[1, 2] = 0.5 * expn * (Pp12 + 1j * Pc12)
-    P_lm[2, 0] = 0.5 * expn * (Pp20 + 1j * Pc20)
-    P_lm[2, 1] = 0.5 * expn * (Pp21 + 1j * Pc21)
-    P_lm[2, 2] = 0.5 * expn * (Pp22 + 1j * Pc22)
+    part = expn * (Pp00 + 1j * Pc00)
+    P_lm[0, 0] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
+    part = expn * (Pp01 + 1j * Pc01)
+    P_lm[0, 1] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
+    part = expn * (Pp02 + 1j * Pc02)
+    P_lm[0, 2] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
+    part = expn * (Pp10 + 1j * Pc10)
+    P_lm[1, 0] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
+    part = expn * (Pp11 + 1j * Pc11)
+    P_lm[1, 1] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
+    part = expn * (Pp12 + 1j * Pc12)
+    P_lm[1, 2] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
+    part = expn * (Pp20 + 1j * Pc20)
+    P_lm[2, 0] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
+    part = expn * (Pp21 + 1j * Pc21)
+    P_lm[2, 1] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
+    part = expn * (Pp22 + 1j * Pc22)
+    P_lm[2, 2] = Y_lm_pos * part + (Y_lm_neg * part).conjugate()
 
 
 @njit

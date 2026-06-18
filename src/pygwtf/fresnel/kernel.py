@@ -4,7 +4,7 @@ from typing import Callable
 import numpy as np
 from numba import cuda, jit
 
-from ..response.transfer import fill_k, fill_P_0_simple, fill_P_lm
+from ..response.transfer import fill_k, fill_P_lm, fill_P_lm_given_Y_lm
 from ..utils import complex_inner_product
 from .common import _fresnel_kernel
 
@@ -676,9 +676,10 @@ def multimode_direct_kernel_constructor(
         segment_start_inds,
         segment_end_inds,
         phase_amp_information,
+        y_lms,
         parameters_response,
         params_source_response,
-        P_0,
+        P_lm,
         k,
         n,
         p,
@@ -714,9 +715,14 @@ def multimode_direct_kernel_constructor(
         phase_amp_information: array (n_sources, n_modes, nT, 4)
             The phase and amplitude information for each mode for each source at each time-segment.
             The 4 values are (amp, phi0, f0, fdot) for each mode at each time-segment.
+        y_lms: array (n_sources, n_modes, 2)
+            The spin-weighted spherical harmonic values for each mode in each source.
+            First element is the positive-m component, second element is the negative-m component. For m = 0,
+            each component should be halved, so that the sum of the two components is equal to the m=0 component.
+            The negative component should include symmetry-related prefactors e.g. (-1)^l.
         parameters_response: array (n_sources, 4) or None
             The parameters describing the response for each source, used if tdi is True. This is used to compute the TDI response for the given source.
-        P_0: array (3, 3) (array to be filled in within the kernel)
+        P_lm: array (3, 3) (array to be filled in within the kernel)
             Local array to store the response function coefficients for TDI computation.
         k: array (3,) (array to be filled in within the kernel)
             Local array to store the wavevector for TDI computation.
@@ -754,13 +760,18 @@ def multimode_direct_kernel_constructor(
             dT_prec = dT
             dF_prec = dF
 
+        Y_lm_pos = y_lms[src_num, mode_num, 0]
+        Y_lm_neg = y_lms[src_num, mode_num, 1]
+
         if tdi:
             # Grab response parameters for specified source if TDI response computation is needed.
             for i in range(3):
                 params_source_response[i + 1] = parameters_response[src_num, i]
 
             # Fill in P_0 tensor and wavevector k for TDI response computation for this source.
-            fill_P_0_simple(P_0, params_source_response)
+            fill_P_lm_given_Y_lm(
+                P_lm, params_source_response, Y_lm_pos, Y_lm_neg
+            )
             fill_k(k, params_source_response)
 
         for t_idx in range(
@@ -777,6 +788,9 @@ def multimode_direct_kernel_constructor(
             f0_mode = phase_amp_information[src_num, mode_num, t_idx, 2]
             fdot_mode = phase_amp_information[src_num, mode_num, t_idx, 3]
 
+            if f0_mode <= 0:
+                continue  # Skip this time-segment if the mode frequency is non-positive.
+
             # Start index in frequency bins for the given mode frequency, used to determine which frequency bins to compute over in the kernel.
             start_ind = int(f0_mode / dF)
             d_h = 0.0 + 0.0j
@@ -792,7 +806,7 @@ def multimode_direct_kernel_constructor(
                     for j in range(3):
                         p[i, j] = spacecraft_orbits[t_idx, i, j]
                 transfer_functions = _get_channels(
-                    f0_mode, P_0, k, p, Ls, n, tdi2
+                    f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
 
             # Cheap way to check how many extra frequency bins to compute over for the given fdot
@@ -813,7 +827,7 @@ def multimode_direct_kernel_constructor(
 
             # Fresnel quantities (common to all frequency bins for a given source at a given time-segment)
             # NOTE: math.sqrt, not np.sqrt -- numpy scalar ufuncs are not supported inside CUDA kernels by this numba version.
-            sqrt2fdot = sqrt(2 * fdot_mode)
+            sqrt2fdot = sqrt(2 * abs(fdot_mode))
             amp_mode_prefac = amp_mode / sqrt2fdot
             one_over_fdot = 1 / fdot_mode
 
@@ -838,7 +852,10 @@ def multimode_direct_kernel_constructor(
                     )
                     # Generate just the polarizations
                     if not tdi:
-                        h_TT = (h_f_pos, 1j * h_f_pos)
+                        h_TT = (
+                            0.5 * (Y_lm_pos + Y_lm_neg.conjugate()) * h_f_pos,
+                            0.5j * (Y_lm_pos - Y_lm_neg.conjugate()) * h_f_pos,
+                        )
 
                     # Generate AET channels via multiplicative, frequency-domain transfer function.
                     for i in range(channels.shape[-1]):
@@ -868,6 +885,7 @@ def multimode_direct_kernel_constructor(
         segment_start_inds,
         segment_end_inds,
         phase_amp_information,
+        y_lms,
         parameters_response,
         spacecraft_orbits,
         spacecraft_ltts,
@@ -892,6 +910,11 @@ def multimode_direct_kernel_constructor(
             The ending time-segment index for each source. Used to determine which time-segments to compute over for the given source.
         phase_amp_information: array (n_sources, n_modes, nT, 4)
             The phase and amplitude information for each source and mode. This is used to compute the waveform for the given source.
+        y_lms: array (n_sources, n_modes, 2)
+            The spin-weighted spherical harmonic values for each mode in each source.
+            First element is the positive-m component, second element is the negative-m component. For m = 0,
+            each component should be halved, so that the sum of the two components is equal to the m=0 component.
+            The negative component should include symmetry-related prefactors e.g. (-1)^l.
         parameters_response: array (n_sources, 4) or None
             The parameters describing the response for each source, used if tdi is True. This is used to compute the TDI response for the given source.
         spacecraft_orbits: array (nT, 3, 3) or None
@@ -938,6 +961,7 @@ def multimode_direct_kernel_constructor(
                 segment_end_inds,
                 phase_amp_information,
                 parameters_response,
+                y_lms,
                 params_source_response,
                 P_lm,
                 k,
@@ -958,6 +982,7 @@ def multimode_direct_kernel_constructor(
         segment_start_inds,
         segment_end_inds,
         phase_amp_information,
+        y_lms,
         parameters_response,
         spacecraft_orbits,
         spacecraft_ltts,
@@ -981,6 +1006,11 @@ def multimode_direct_kernel_constructor(
             The ending time-segment index for each source. Used to determine which time-segments to compute over for the given source.
         phase_amp_information: array (n_sources, n_modes, nT, 4)
             Array containing phase and amplitude information for each mode of each source.
+        y_lms: array (n_sources, n_modes, 2)
+            The spin-weighted spherical harmonic values for each mode in each source.
+            First element is the positive-m component, second element is the negative-m component. For m = 0,
+            each component should be halved, so that the sum of the two components is equal to the m=0 component.
+            The negative component should include symmetry-related prefactors e.g. (-1)^l.
         parameters_response: array (n_sources, 4) or None
             The parameters describing the response for each source, used if tdi is True. This is used to compute the TDI response for the given source.
         spacecraft_orbits: array (nT, 3, 3) or None
@@ -1018,6 +1048,7 @@ def multimode_direct_kernel_constructor(
                     segment_start_inds,
                     segment_end_inds,
                     phase_amp_information,
+                    y_lms,
                     parameters_response,
                     params_source_response,
                     P_lm,
