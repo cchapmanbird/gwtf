@@ -765,8 +765,8 @@ def multimode_direct_kernel_constructor(
 
         if tdi:
             # Grab response parameters for specified source if TDI response computation is needed.
-            for i in range(3):
-                params_source_response[i + 1] = parameters_response[src_num, i]
+            for i in range(4):
+                params_source_response[i] = parameters_response[src_num, i]
 
             # Fill in P_0 tensor and wavevector k for TDI response computation for this source.
             fill_P_lm_given_Y_lm(
@@ -935,7 +935,7 @@ def multimode_direct_kernel_constructor(
             (Should be set to True in almost all circumstances)
         """
         # one source per thread
-        modes_per_source = channels.shape[1]
+        modes_per_source = phase_amp_information.shape[1]
         total = int(phase_amp_information.shape[0] * modes_per_source)
         thread_num = cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x
 
@@ -960,8 +960,8 @@ def multimode_direct_kernel_constructor(
                 segment_start_inds,
                 segment_end_inds,
                 phase_amp_information,
-                parameters_response,
                 y_lms,
+                parameters_response,
                 params_source_response,
                 P_lm,
                 k,
