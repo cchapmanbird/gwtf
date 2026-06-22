@@ -100,7 +100,7 @@ def get_analytic_orbits(t_tranche: np.ndarray)-> np.ndarray:
 
 ## ------------- Mojito orbits ------------- ##
 
-def read_in_mojito_orbits(filepath,
+def read_in_mojito_orbit(filepath,
                             t0_data = 97729939.827664,
                             tend_data = 160846137.32766402,
                             )-> tuple[np.ndarray, 
@@ -195,97 +195,6 @@ def read_in_mojito_orbits(filepath,
     pos_sc3 = final_postions[2]
 
     return (pos_sc1, pos_sc2, pos_sc3, orbital_time_shifted_data)
-
-# def read_in_mojito_orbit_old(filepath: str)-> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-#     """
-#     NOTE: DEPRECATED, EQUIVALENT TO 
-
-#     Plugin for reading in Mojito orbit files for LISA spacecraft positions.
-#     NOTE: Should really be deprecated by the mojito package, but this is a quick and dirty way to get the orbits in for now.
-#     NOTE: This is *not* compatible with the
-#         additional trim that is needed to get rid of the low frequency noise that comes from the high pass
-#         filter of mojito data...
-#     NOTE: Hardcoded to the times-shifts needed for the 0.4Hz downsampled data for now.
-
-#     Args:
-#         filepath (str): Path to the Mojito orbit file
-#     Returns:
-#         pos_sc1 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 1 as a function of time.
-#         pos_sc2 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 2 as a function of time.
-#         pos_sc3 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 3 as a function of time.
-#         orbital_times_shifted (numpy.array): Array of shape (N_times_orbital,) containing the shifted orbital times corresponding to the positions.
-#     """
-
-#     orbit_datafile = h5py.File(filepath, "r")
-
-#     # Extract positions (N_times_orbital,#Spacecraft,#{x,y,z})
-#     positions = orbit_datafile["tcb"]["x"][()]
-
-#     N_times_orbital = positions.shape[0]
-
-#     # Orbital data time spacing.
-#     orbital_dt = orbit_datafile.attrs["dt"]
-
-#     # print('Orbital dt (s):',orbital_dt)
-
-#     # Orbital time array (Covers 61171239.327664s to 197671239.32766402s)
-#     orbital_times = orbital_dt * np.arange(
-#         N_times_orbital
-#     )  # t0 for this is actually 61171239.327664
-
-#     # Our data collection starts at 97729939.827664 (0.4Hz), this relative to the t0 above is 36558700.5
-#     # Our data collection ends at 160846189.07766402 (0.4Hz), this relative to the t0 above is 99674949.75000001
-
-#     data_collection_start = 36558700.5  # This is our new t0 (literally will be zero), relative to the start of the orbital data.
-#     data_collection_end = 99674949.75000001  # This is the end of our data collection, relative to the start of the orbital data.
-
-#     filter_indices = np.where(
-#         (orbital_times >= data_collection_start)
-#         & (orbital_times <= data_collection_end)
-#     )[0]
-
-#     positions = positions[
-#         filter_indices, :, :
-#     ]  # Shape (N_times_orbital_filtered,#Spacecraft,#{x,y,z})
-
-#     orbital_times = orbital_times[
-#         filter_indices
-#     ]  # Shape (N_times_orbital_filtered,)
-
-#     # Shifting all times to zero otherwise will have to add time shift to times coming out of waveform.
-#     orbital_times_shifted = (
-#         orbital_times - data_collection_start
-#     )  # Shift to start at zero.
-
-#     pos_sc1 = positions[:, 0, :].T  # Shape (3,N_times_orbital)
-#     pos_sc2 = positions[:, 1, :].T
-#     pos_sc3 = positions[:, 2, :].T
-
-#     # Convert from ICRS (orbit file coordinates.) to ecliptic coords using astropy, for each spacecraft.
-#     final_postions = []
-#     for i in range(3):
-#         c_icrs = SkyCoord(
-#             positions[:, i, 0].T,
-#             positions[:, i, 1].T,
-#             positions[:, i, 2].T,
-#             frame="icrs",
-#             unit="m",
-#             representation_type="cartesian",
-#         )
-
-#         c_ecliptic = c_icrs.transform_to(BarycentricMeanEcliptic)
-#         c_ecliptic.representation_type = "cartesian"
-#         final_postions.append(
-#             np.array(
-#                 [c_ecliptic.x.value, c_ecliptic.y.value, c_ecliptic.z.value]
-#             )
-#         )
-
-#     pos_sc1 = final_postions[0]
-#     pos_sc2 = final_postions[1]
-#     pos_sc3 = final_postions[2]
-
-#     return (pos_sc1, pos_sc2, pos_sc3, orbital_times_shifted)
 
 def read_in_mojito_ltts(filepath,
                         t0_data = 97729939.827664,
@@ -404,3 +313,96 @@ def get_analytic_ltts(spacecraft_orbits: np.ndarray)-> np.ndarray:
 
 
     return np.array([L12, L23, L31]).T
+
+
+
+# def read_in_mojito_orbit_old(filepath: str)-> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+#     """
+#     NOTE: DEPRECATED, EQUIVALENT TO 
+
+#     Plugin for reading in Mojito orbit files for LISA spacecraft positions.
+#     NOTE: Should really be deprecated by the mojito package, but this is a quick and dirty way to get the orbits in for now.
+#     NOTE: This is *not* compatible with the
+#         additional trim that is needed to get rid of the low frequency noise that comes from the high pass
+#         filter of mojito data...
+#     NOTE: Hardcoded to the times-shifts needed for the 0.4Hz downsampled data for now.
+
+#     Args:
+#         filepath (str): Path to the Mojito orbit file
+#     Returns:
+#         pos_sc1 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 1 as a function of time.
+#         pos_sc2 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 2 as a function of time.
+#         pos_sc3 (numpy.array): Array of shape (3,N_times_orbital) containing the positions of spacecraft 3 as a function of time.
+#         orbital_times_shifted (numpy.array): Array of shape (N_times_orbital,) containing the shifted orbital times corresponding to the positions.
+#     """
+
+#     orbit_datafile = h5py.File(filepath, "r")
+
+#     # Extract positions (N_times_orbital,#Spacecraft,#{x,y,z})
+#     positions = orbit_datafile["tcb"]["x"][()]
+
+#     N_times_orbital = positions.shape[0]
+
+#     # Orbital data time spacing.
+#     orbital_dt = orbit_datafile.attrs["dt"]
+
+#     # print('Orbital dt (s):',orbital_dt)
+
+#     # Orbital time array (Covers 61171239.327664s to 197671239.32766402s)
+#     orbital_times = orbital_dt * np.arange(
+#         N_times_orbital
+#     )  # t0 for this is actually 61171239.327664
+
+#     # Our data collection starts at 97729939.827664 (0.4Hz), this relative to the t0 above is 36558700.5
+#     # Our data collection ends at 160846189.07766402 (0.4Hz), this relative to the t0 above is 99674949.75000001
+
+#     data_collection_start = 36558700.5  # This is our new t0 (literally will be zero), relative to the start of the orbital data.
+#     data_collection_end = 99674949.75000001  # This is the end of our data collection, relative to the start of the orbital data.
+
+#     filter_indices = np.where(
+#         (orbital_times >= data_collection_start)
+#         & (orbital_times <= data_collection_end)
+#     )[0]
+
+#     positions = positions[
+#         filter_indices, :, :
+#     ]  # Shape (N_times_orbital_filtered,#Spacecraft,#{x,y,z})
+
+#     orbital_times = orbital_times[
+#         filter_indices
+#     ]  # Shape (N_times_orbital_filtered,)
+
+#     # Shifting all times to zero otherwise will have to add time shift to times coming out of waveform.
+#     orbital_times_shifted = (
+#         orbital_times - data_collection_start
+#     )  # Shift to start at zero.
+
+#     pos_sc1 = positions[:, 0, :].T  # Shape (3,N_times_orbital)
+#     pos_sc2 = positions[:, 1, :].T
+#     pos_sc3 = positions[:, 2, :].T
+
+#     # Convert from ICRS (orbit file coordinates.) to ecliptic coords using astropy, for each spacecraft.
+#     final_postions = []
+#     for i in range(3):
+#         c_icrs = SkyCoord(
+#             positions[:, i, 0].T,
+#             positions[:, i, 1].T,
+#             positions[:, i, 2].T,
+#             frame="icrs",
+#             unit="m",
+#             representation_type="cartesian",
+#         )
+
+#         c_ecliptic = c_icrs.transform_to(BarycentricMeanEcliptic)
+#         c_ecliptic.representation_type = "cartesian"
+#         final_postions.append(
+#             np.array(
+#                 [c_ecliptic.x.value, c_ecliptic.y.value, c_ecliptic.z.value]
+#             )
+#         )
+
+#     pos_sc1 = final_postions[0]
+#     pos_sc2 = final_postions[1]
+#     pos_sc3 = final_postions[2]
+
+#     return (pos_sc1, pos_sc2, pos_sc3, orbital_times_shifted)
