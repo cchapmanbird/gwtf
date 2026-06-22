@@ -287,11 +287,18 @@ def read_in_mojito_orbits(filepath,
 
 #     return (pos_sc1, pos_sc2, pos_sc3, orbital_times_shifted)
 
-def read_in_mojito_ltts(filepath: str)-> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def read_in_mojito_ltts(filepath,
+                        t0_data = 97729939.827664,
+                        tend_data = 160846137.32766402,
+                        )-> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     '''
     Read in mojito LTT file. 
-    Should really do this in a better way, currently requires a unique LTT file which contains the LTTs for each link (assuming symmetric LTTs for now). 
-    Following same time conventions as the orbit file mojito. (Assuming that the LTT times are already subset to the data collection time in preprocessing.)
+    
+    To obtain t0_data and tend_data, the easiest method:
+        - Use MojitoProcessor to download the TDI-data for the sampling rate required
+        - Look at the t_tdi array in the processed data, this will give you the start (t0_data) and end times (tend_data) of the data collection.
+
+    For context on timings and time-shifts see the CD1 CU-SIM document: TODO: Add link to CD1 document here. 
 
     Only extracts: {12, 23, 31} links for now.
 
@@ -311,7 +318,15 @@ def read_in_mojito_ltts(filepath: str)-> tuple[np.ndarray, np.ndarray, np.ndarra
     L23 = ltt_file['ltts'][:, 1]
     L31 = ltt_file['ltts'][:, 2]
 
-    LTT_times_shifted = ltt_file['ltt_times'] - ltt_file['ltt_times'][0] # Shift to start at zero, same convention as the orbit file.
+    ltt_times = ltt_file['ltt_times']
+
+    # Find indices of the ltts which are within the data collection time. 
+    filter_indices = np.where(
+        (ltt_times >= t0_data)
+        & (ltt_times <= tend_data)
+    )[0]
+
+    LTT_times_shifted = ltt_times[filter_indices] -  t0_data # Shift to start at zero, same convention as the orbit file.
 
     return(L12, L23, L31, LTT_times_shifted)
 
