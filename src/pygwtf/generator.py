@@ -37,11 +37,11 @@ class AnalyticTimeFrequencyWaveform:
         TDI generation order.  ``None`` produces TT polarisations.
         ``2`` produces second-generation TDI.
     channels : array_like, optional
-        Pre-computed data array of shape ``(nT, nF, n_channels)
-        ``. Required for statistic evaluation if not supplied at call time.
+        Pre-computed data array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
+        Required for statistic evaluation if not supplied at call time.
     psds : array_like, optional
-        Pre-computed PSD array of shape ``(nT, nF, n_channels)
-        ``. Required for statistic evaluation if not supplied at call time.
+        Pre-computed PSD array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
+        Required for statistic evaluation if not supplied at call time.
     spacecraft_orbits : array_like, optional
         Pre-computed spacecraft orbits array of shape ``(nT, 3,
         3)``. Required for TDI generation if not supplied at initialisation, in which case analytic orbits will be used.
@@ -53,6 +53,10 @@ class AnalyticTimeFrequencyWaveform:
         Whether to use a block-vectorised GPU kernel, where each block processes one source in one time segment,
         and each thread processes one frequency bin for that configuration. This can improve performance for small
         numbers of sources, but may be slower for large numbers of sources. Default is False.
+    gf_mode : bool, optional
+        Whether to use global fit mode, where each source is treated as a separate walker in a global fit. 
+        In this mode, the channels and psds arrays must have shape (nwalkers, nT, nF, n_channels). Default is False.
+        NOTE: Not intended to use with the semi-coherent statistic kernels, only intended use is to use the usual normal kernels to compute d_h and h_h.
     """
 
     def __init__(
@@ -67,6 +71,7 @@ class AnalyticTimeFrequencyWaveform:
         spacecraft_orbits: np.ndarray | None = None,
         spacecraft_ltts: np.ndarray | None = None,
         block_vectorised_gpu: bool = False,
+        gf_mode: bool = False,
     ):
         self.backend = (
             get_backend(backend) if isinstance(backend, str) else backend
@@ -80,6 +85,15 @@ class AnalyticTimeFrequencyWaveform:
         assert np.all(
             [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
+
+        # Check if in global fit mode, check shapes of PSD and array
+        if gf_mode:
+            assert len(channels.shape) == 4, (
+                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and psds must correspond to a PSD array of shape (nwalkers, nT, nF, n_channels)."
+            )
+            assert len(psds.shape) == 4, (
+                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and psds must correspond to a PSD array of shape (nwalkers, nT, nF, n_channels)."
+            )
 
         if block_vectorised_gpu:
             assert backend == "gpu", "Block vectorised GPU kernels can only be used with GPU backend."
@@ -164,13 +178,14 @@ class AnalyticTimeFrequencyWaveform:
             channel_fn,
         )
 
-        # Construct waveform kernels, these are used to return the h_plys/h_cross or TDI channels for given parameters.
+        # Construct waveform kernels, these are used to return the h_plus/h_cross or TDI channels for given parameters.
         self.waveform_kernel_cpu, self.waveform_kernel_gpu = (
             analytic_kernel_constructor(
                 *constructor_args,
                 compute_statistic=False,
                 tdi_type=tdi_type,
                 block_vectorised_gpu=block_vectorised_gpu,
+                gf_mode = gf_mode,
             )
         )
 
@@ -182,6 +197,7 @@ class AnalyticTimeFrequencyWaveform:
                 compute_statistic=True,
                 tdi_type=tdi_type,
                 block_vectorised_gpu=block_vectorised_gpu,
+                gf_mode = gf_mode,
             )
         )
 
@@ -194,28 +210,45 @@ class AnalyticTimeFrequencyWaveform:
 
         self._param_cache = None
 
-        # Corresponds to the 'data' array against which inner-products are computed. Can be left as None if only waveform generation is desired.
-        if channels is not None:
-            assert channels.shape == (
-                self.config["nT"],
-                self.config["nF"],
-                self.n_channels,
-            ), (
-                f"Channels array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
-            )
+        self.gf_mode = gf_mode
+
+        # Corresponds to the 'data' array against which inner-products are computed, and the PSD
+        # array used for the inner-product/statistic computation. Both can be left as None if only
+        # waveform generation is desired.
+        #
+        # In global-fit mode each walker/source carries its own data and PSD, so the trailing
+        # (nT, nF, n_channels) block is validated but preceded by a leading nwalkers axis. The
+        # nwalkers==n_sources consistency is enforced implicitly by the kernel's per-source indexing.
+        if gf_mode:
+            expected_shape = (self.config["nT"], self.config["nF"], self.n_channels)
+            if channels is not None:
+                assert channels.shape[1:] == expected_shape, (
+                    f"In global fit mode, channels must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels})"
+                )
+            if psds is not None:
+                assert psds.shape[1:] == expected_shape, (
+                    f"In global fit mode, psds must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels})"
+                )
+        else:
+            if channels is not None:
+                assert channels.shape == (
+                    self.config["nT"],
+                    self.config["nF"],
+                    self.n_channels,
+                ), (
+                    f"Channels array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
+                )
+
+            if psds is not None:
+                assert psds.shape == (
+                    self.config["nT"],
+                    self.config["nF"],
+                    self.n_channels,
+                ), (
+                    f"PSDs array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
+                )
 
         self.channels = channels
-
-        # Corresponds to the PSD array used for inner-product/statistic computation. Can be left as None if only waveform generation is desired.
-        if psds is not None:
-            assert psds.shape == (
-                self.config["nT"],
-                self.config["nF"],
-                self.n_channels,
-            ), (
-                f"PSDs array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
-            )
-
         self.psds = psds
 
         self.block_vectorised_gpu = block_vectorised_gpu
@@ -437,7 +470,7 @@ class AnalyticTimeFrequencyWaveform:
         parameters : dict or array_like, shape (n_sources, n_params)
             Source parameters as a named dict or a 2-D array in model order.
         channels : array_like or None
-            Data array of shape ``(nT, nF, n_channels)``.
+            Data array of shape ``(nT, nF, n_channels)`` or (n_sources, nT, nF, n_channels) if gf_mode is True or compute_statistic is False.
         psds : array_like, optional
             Power spectral densities, shape ``(nT, nF, n_channels)``.
             Required for statistic output. If not supplied
@@ -527,6 +560,7 @@ class AnalyticTimeFrequencyWaveform:
             inv_psds = 1.0 / psds * 4 * dF
 
             # Branch: Compute d_h and h_h per segment.
+            # NOTE: This is the usual default branch for Global-fit. 
             if N_seg is None:
                 # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2).
                 #   If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).

@@ -17,6 +17,7 @@ def analytic_kernel_constructor(
     compute_statistic: bool = False,
     tdi_type: int | None = None,
     block_vectorised_gpu: bool = False,
+    gf_mode: bool = False
 ):
     """
     Constructor method used to generate a kernel function for computing Fresnel waveforms and derived inner-product statistics (d_h and h_h).
@@ -83,6 +84,8 @@ def analytic_kernel_constructor(
             raise ValueError(
                 f"Invalid tdi_type: {tdi_type}. Must be 1, 2, or None."
             )
+    # Flag on whether to expect a unique data and inverse psd for each source, as in a global fit.
+    global_fit_mode = gf_mode
 
     @jit
     def kernel_inner(
@@ -104,7 +107,7 @@ def analytic_kernel_constructor(
         statistic,
         inv_psds,
         mixed_precision,
-        use_midpoint,
+        use_midpoint,# TODO: move this outside into analytic kernel constructor
     ):
         """
         NOTE: HARDWARE AGNOSTIC
@@ -118,7 +121,7 @@ def analytic_kernel_constructor(
         ----------
         src_num: int
             The index of the source for which to compute the waveforms/statistics.
-        channels: array (n_sources, nT, nF, n_channels)
+        channels: array (n_sources, nT, nF, n_channels) or (n_sources, nT, nF, n_channels) if either gf_mode is True or if compute_statistic is False
             Either the array to be filled in with the computed waveforms for each time-segment and frequency bin (if compute_statistic is False)
             Or the data array to be used to compute statistics (d_h and h_h) if compute_statistic is True.
         segment_start_inds: array (n_sources,)
@@ -150,13 +153,16 @@ def analytic_kernel_constructor(
             NOTE: Precomputed, not computed in the kernel at runtime.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h) for each time-segment for the given source.
-        inv_psds: array (nT, nF, n_channels) or None
+        inv_psds: array (nT, nF, n_channels) or None or (n_sources, nT, nF, n_channels) if global_fit_mode is True
             The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         use_midpoint : bool
             Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
             (Should be set to True in almost all circumstances)
+        gf_mode: bool
+            Whether to use global fit mode, where each source is treated as a separate walker in a global fit. 
+            Main difference in this mode is each source has an associated data (channels array) and inverse psd (inv_psds array).
         """
         # Grab parameters for specified source.
         for i in range(nparams):
@@ -266,9 +272,15 @@ def analytic_kernel_constructor(
                             h = h_TT[i]
 
                         # If compute_statistic is True, compute the inner products for d_h and h_h using the data in channels and the computed waveform h, and the inverse psd in inv_psds.
+                        # global_fit_mode is a special mode where each source is treated as a separate walker in a global fit, and each source has its own data (channels array) and inverse psd (inv_psds array).
+                        # In this mode, the channels and inv_psds arrays have shape (n_sources, nT, nF, n_channels), and we need to index into them using src_num to get the data for the current source.
                         if compute_statistic:
-                            d = channels[t_idx, f_idx, i]
-                            inv_psd = inv_psds[t_idx, f_idx, i]
+                            if global_fit_mode:
+                                d = channels[src_num, t_idx, f_idx, i]
+                                inv_psd = inv_psds[src_num, t_idx, f_idx, i]
+                            else: 
+                                d = channels[t_idx, f_idx, i]
+                                inv_psd = inv_psds[t_idx, f_idx, i]
                             d_h += complex_inner_product(d, h, inv_psd)
                             h_h += complex_inner_product(h, h, inv_psd)
                         else:
@@ -299,9 +311,10 @@ def analytic_kernel_constructor(
 
         Parameters:
         ----------
-        channels: array (n_sources, nT, nF, n_channels)
+        channels: array (nT, nF, n_channels)  or (n_sources, nT, nF, n_channels) if either global_fit_mode is True or if compute_statistic is False
             Either the array to be filled in with the computed waveforms for each time-segment and frequency bin (if compute_statistic is False)
             Or the data array to be used to compute statistics (d_h and h_h) if compute_statistic is True.
+            In global fit mode this corresponds to the data for each source, and has shape (n_sources, nT, nF, n_channels).
         segment_start_inds: array (n_sources,)
             The starting time-segment index for each source. Used to determine which time-segments to compute over for the given source.
         segment_end_inds: array (n_sources,)
@@ -319,7 +332,7 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h for each time-segment for the given source.
-        inv_psds: array (nT, nF, n_channels) or None
+        inv_psds: array (nT, nF, n_channels) or (n_sources, nT, nF, n_channels) if global_fit_mode is True or None 
             The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
@@ -383,9 +396,10 @@ def analytic_kernel_constructor(
 
         Parameters:
         ----------
-        channels: array (n_sources, nT, nF, n_channels)
+        channels: array (nT, nF, n_channels)  or (n_sources, nT, nF, n_channels) if either global_fit_mode is True or if compute_statistic is False
             Either the array to be filled in with the computed waveforms for each time-segment and frequency bin (if compute_statistic is False)
             Or the data array to be used to compute statistics (d_h and h_h) if compute_statistic is True.
+            In global fit mode this corresponds to the data for each source, and has shape (n_sources, nT, nF, n_channels).
         segment_start_inds: array (n_sources,)
             The starting time-segment index for each source. Used to determine which time-segments to compute over for the given source.
         segment_end_inds: array (n_sources,)
@@ -403,8 +417,8 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h for each time-segment for the given source.
-        inv_psds: array (nT, nF, n_channels) or None
-            The reciprocal (1/psd) of the noise PSD. Used to compute the inner products for the statistics if compute_statistic is True.
+        inv_psds: array (nT, nF, n_channels) or (n_sources, nT, nF, n_channels) if global_fit_mode is True or None 
+            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         use_midpoint : bool
@@ -471,9 +485,10 @@ def analytic_kernel_constructor(
 
         Parameters:
         ----------
-        channels: array (n_sources, nT, nF, n_channels)
+        channels: array (nT, nF, n_channels)  or (n_sources, nT, nF, n_channels) if either global_fit_mode is True or if compute_statistic is False
             Either the array to be filled in with the computed waveforms for each time-segment and frequency bin (if compute_statistic is False)
             Or the data array to be used to compute statistics (d_h and h_h) if compute_statistic is True.
+            In global fit mode this corresponds to the data for each source, and has shape (n_sources, nT, nF, n_channels).
         segment_start_inds: array (n_sources,)
             The starting time-segment index for each source. Used to determine which time-segments to compute over for the given source.
         segment_end_inds: array (n_sources,)
@@ -491,7 +506,7 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Array to store the computed statistics: [..., 0] holds d_h and [..., 1] holds h_h for each time-segment of the given source.
-        inv_psds: array (nT, nF, n_channels) or None
+        inv_psds: array (nT, nF, n_channels) or (n_sources, nT, nF, n_channels) if global_fit_mode is True or None
             The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool 
             NOTE this is not currently implemented for the block-vectorised kernel.
@@ -616,10 +631,16 @@ def analytic_kernel_constructor(
 
                         # If compute_statistic is True, compute the inner products for d_h and h_h using the data in channels and the computed waveform h, and the inverse psd in inv_psds.
                         if compute_statistic:
-                            d = channels[t_idx, freq_ind, i]
-                            inv_psd = inv_psds[t_idx, freq_ind, i]
-                            d_h_here += complex_inner_product(d, h, inv_psd)
-                            h_h_here += complex_inner_product(h, h, inv_psd)
+                            # global_fit_mode is a special mode where each source is treated as a separate walker in a global fit, and each source has its own data (channels array) and inverse psd (inv_psds array).
+                            if global_fit_mode:
+                                d = channels[src_num, t_idx, f_idx, i]
+                                inv_psd = inv_psds[src_num, t_idx, f_idx, i]
+                            else: 
+                                d = channels[t_idx, f_idx, i]
+                                inv_psd = inv_psds[t_idx, f_idx, i]
+
+                            d_h += complex_inner_product(d, h, inv_psd)
+                            h_h += complex_inner_product(h, h, inv_psd)
                         else:
                             channels[src_num, t_idx, freq_ind, i] = h
 
