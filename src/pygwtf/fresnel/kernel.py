@@ -633,14 +633,14 @@ def analytic_kernel_constructor(
                         if compute_statistic:
                             # global_fit_mode is a special mode where each source is treated as a separate walker in a global fit, and each source has its own data (channels array) and inverse psd (inv_psds array).
                             if global_fit_mode:
-                                d = channels[src_num, t_idx, f_idx, i]
-                                inv_psd = inv_psds[src_num, t_idx, f_idx, i]
-                            else: 
-                                d = channels[t_idx, f_idx, i]
-                                inv_psd = inv_psds[t_idx, f_idx, i]
+                                d = channels[src_num, t_idx, freq_ind, i]
+                                inv_psd = inv_psds[src_num, t_idx, freq_ind, i]
+                            else:
+                                d = channels[t_idx, freq_ind, i]
+                                inv_psd = inv_psds[t_idx, freq_ind, i]
 
-                            d_h += complex_inner_product(d, h, inv_psd)
-                            h_h += complex_inner_product(h, h, inv_psd)
+                            d_h_here += complex_inner_product(d, h, inv_psd)
+                            h_h_here += complex_inner_product(h, h, inv_psd)
                         else:
                             channels[src_num, t_idx, freq_ind, i] = h
 
