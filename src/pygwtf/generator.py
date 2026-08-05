@@ -37,10 +37,10 @@ class AnalyticTimeFrequencyWaveform:
         TDI generation order.  ``None`` produces TT polarisations.
         ``2`` produces second-generation TDI.
     channels : array_like, optional
-        Pre-computed data array of shape ``(nT, nF, n_channels)`` or ``(nsources = nwalkers x ntemps, nT, nF, n_channels)`` (gf_mode).
+        Pre-computed data array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
         Required for statistic evaluation if not supplied at call time.
     psds : array_like, optional
-        Pre-computed PSD array of shape ``(nT, nF, n_channels)`` or ``(nsources = nwalkers x ntemps, nT, nF, n_channels)`` (gf_mode).
+        Pre-computed PSD array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
         Required for statistic evaluation if not supplied at call time.
     spacecraft_orbits : array_like, optional
         Pre-computed spacecraft orbits array of shape ``(nT, 3,
@@ -54,12 +54,9 @@ class AnalyticTimeFrequencyWaveform:
         and each thread processes one frequency bin for that configuration. This can improve performance for small
         numbers of sources, but may be slower for large numbers of sources. Default is False.
     gf_mode : bool, optional
-        Whether to use global fit mode, where each source is treated as a separate walker in a global fit. Default is False. 
-        In this mode:
-        -  the psds arrays must have shape (nwalkers x ntemps=nsources, nT, nF, n_channels).
-        -  the channels arrays must have shape (nwalkers, nT, nF, n_channels).
-        NOTE: In the global fit there are (nwalkers x ntemps) PSDs but only cold chain (i.e. nwalkers) data. 
-        NOTE: Not supported with the semi-coherent statistic kernels, only intended use is to use the usual normal kernels to compute d_h and h_h.
+        Whether to use global fit mode, where each source is treated as a separate walker in a global fit. 
+        In this mode, the channels and psds arrays must have shape (nwalkers, nT, nF, n_channels). Default is False.
+        NOTE: Not intended to use with the semi-coherent statistic kernels, only intended use is to use the usual normal kernels to compute d_h and h_h.
     """
 
     def __init__(
@@ -90,12 +87,12 @@ class AnalyticTimeFrequencyWaveform:
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
 
         # Check if in global fit mode, check shapes of PSD and array
-        if gf_mode and channels is not None and psds is not None:
+        if gf_mode:
             assert len(channels.shape) == 4, (
-                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and psds must correspond to a PSD array of shape (nwalkers x ntemps, nT, nF, n_channels)."
+                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and psds must correspond to a PSD array of shape (nwalkers, nT, nF, n_channels)."
             )
             assert len(psds.shape) == 4, (
-                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and psds must correspond to a PSD array of shape (nwalkers x ntemps, nT, nF, n_channels)."
+                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and psds must correspond to a PSD array of shape (nwalkers, nT, nF, n_channels)."
             )
 
         if block_vectorised_gpu:
@@ -218,9 +215,10 @@ class AnalyticTimeFrequencyWaveform:
         # Corresponds to the 'data' array against which inner-products are computed, and the PSD
         # array used for the inner-product/statistic computation. Both can be left as None if only
         # waveform generation is desired.
-
-        # In global-fit mode each walker its own data and a set of (ntemps) PSDs, so the trailing
-        # (nT, nF, n_channels) block is validated. 
+        #
+        # In global-fit mode each walker/source carries its own data and PSD, so the trailing
+        # (nT, nF, n_channels) block is validated but preceded by a leading nwalkers axis. The
+        # nwalkers==n_sources consistency is enforced implicitly by the kernel's per-source indexing.
         if gf_mode:
             expected_shape = (self.config["nT"], self.config["nF"], self.n_channels)
             if channels is not None:
@@ -229,7 +227,7 @@ class AnalyticTimeFrequencyWaveform:
                 )
             if psds is not None:
                 assert psds.shape[1:] == expected_shape, (
-                    f"In global fit mode, psds must have shape (nsources = nwalkers x ntemps, {self.config['nT']}, {self.config['nF']}, {self.n_channels})"
+                    f"In global fit mode, psds must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels})"
                 )
         else:
             if channels is not None:
@@ -464,7 +462,6 @@ class AnalyticTimeFrequencyWaveform:
         N_seg: int | None = None,
         mixed_precision: bool = False,
         use_midpoint: bool = True,
-        data_indices: np.ndarray | None = None,
     ):
         """Evaluate the analytic waveform/inner-product statistic/search statistic.
 
@@ -473,12 +470,11 @@ class AnalyticTimeFrequencyWaveform:
         parameters : dict or array_like, shape (n_sources, n_params)
             Source parameters as a named dict or a 2-D array in model order.
         channels : array_like or None
-            Data array of shape ``(nT, nF, n_channels)`` or ``(n_walkers, nT, nF, n_channels)`` if gf_mode is True.
+            Data array of shape ``(nT, nF, n_channels)`` or (n_sources, nT, nF, n_channels) if gf_mode is True or compute_statistic is False.
         psds : array_like, optional
             Power spectral densities, shape ``(nT, nF, n_channels)``.
             Required for statistic output. If not supplied
             will use the stored psds from initialisation.
-            if gf_mode is True, then psds must have shape (n_walkers x ntemps = nsources, nT, nF, n_channels).
         parameters_response : array_like, shape (n_sources, 4), optional
             Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``.
             Required when using TDI.
@@ -503,12 +499,6 @@ class AnalyticTimeFrequencyWaveform:
         use_midpoint : bool, optional
             Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning. (Default: True)
             (Should be set to True in almost all cases)
-        data_indices : array (nwalkers x ntemps = nsources), optional
-            Maps each source to its data realisation: source index -> index into the
-            leading axis of channels. Only read when global_fit_mode is True; otherwise
-            a dummy 1-element array is passed, since None cannot be marshalled as a
-            CUDA kernel argument.
-        
         Returns
         -------
         ndarray
@@ -545,7 +535,7 @@ class AnalyticTimeFrequencyWaveform:
                 f"parameters_response must have shape {(n_sources, 4)}"
             )
 
-        # Resolve the data/PSD arrays stored at construction before validating against them.
+        # Branch: Compute either d_h and h_h per segment, or the semi-coherent search statistics.
         if compute_statistic:
             if channels is None:
                 channels = self.channels
@@ -557,42 +547,6 @@ class AnalyticTimeFrequencyWaveform:
                 assert psds is not None, (
                     "PSDs must be supplied to compute the statistic."
                 )
-
-        # In global fit mode, data_indices must be supplied to map sources to data. In non-global fit mode, data_indices must be None.
-        if self.gf_mode:
-            assert N_seg is None, (
-                "In global fit mode, N_seg must be None as semi-coherent search statistics is not supported in global fit mode."
-            )
-            assert (compute_statistic), (
-                "In global fit mode, compute_statistic must be True to compute the inner-product statistics and semi-coherent search statistics is not supported in global fit mode."
-            )   
-            assert data_indices is not None, (
-                "In global fit mode, data_indices must be supplied to map sources to data."
-            )
-            data_indices = xp.asarray(data_indices, dtype=np.int32) # Convert data indices to xp array for kernel call
-            assert data_indices.shape == (n_sources,), (
-                f"data_indices must have shape {(n_sources,)}, got {data_indices.shape}."
-            )
-            assert 0 <= int(data_indices.min()) and int(data_indices.max()) < channels.shape[0], (
-                f"data_indices must lie in [0, {channels.shape[0] - 1}] — "
-                f"there are only {channels.shape[0]} data realisations."
-            )
-            assert psds.shape[0] == n_sources, (
-                f"In global fit mode there must be one PSD per source: "
-                f"expected {n_sources}, got {psds.shape[0]}."
-            )
-
-        elif data_indices is None:
-            data_indices = xp.arange(1, dtype=np.int32) # unused, but required for kernel call signature 
-        else: 
-            raise ValueError(
-                "data_indices must be supplied in global fit mode, and must be None in non-global fit mode."
-            )
-
-            
-
-        # Branch: Compute either d_h and h_h per segment, or the semi-coherent search statistics.
-        if compute_statistic:
             if parameters_response is None:
                 parameters_response = xp.zeros(
                     (n_sources, 4), dtype=np.float64
@@ -632,7 +586,6 @@ class AnalyticTimeFrequencyWaveform:
                     inv_psds,
                     mixed_precision,
                     use_midpoint,
-                    data_indices,
                 )
             # Branch: Compute the semi-coherent search-statistic.
             #   NOTE: This branch/option does not return d_h and h_h at a time-segment level
@@ -688,7 +641,6 @@ class AnalyticTimeFrequencyWaveform:
                 else xp.zeros(1, dtype=np.float64),
                 mixed_precision,
                 use_midpoint,
-                data_indices,
             )
 
         return out[0] if single_source else out
