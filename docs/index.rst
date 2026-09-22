@@ -13,3 +13,11 @@ If you find this package useful, please consider citing both the `software <http
    ../examples/quickstart.ipynb
 
    API reference </autoapi/pygwtf/index>
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Examples:
+
+   ../examples/taylort3.ipynb
+   ../examples/Parameter_estimation.ipynb
+   ../examples/global_fit_walkers.ipynb

@@ -8,6 +8,8 @@ Usage of waveform generator in an end-to-end parameter estimation provided in th
 
 Currently being used to analyse the stellar-origin binaries in the LISA data-challenge Mojito lite.
 
+Basic documentation available <a href="https://pygwtf.readthedocs.io/en/latest/index.html">here</a>.
+
 Features:
 --------
 - Support both CPU and GPU based computations of both waveforms and likelihoods.
@@ -35,7 +37,11 @@ If you use ``pygwtf`` in your work, please consider citing both the software [do
     eprint = "2510.19047",
     archivePrefix = "arXiv",
     primaryClass = "gr-qc",
-    month = "10",
-    year = "2025"
+    doi = "10.1103/339z-w985",
+    journal = "Phys. Rev. D",
+    volume = "114",
+    number = "6",
+    pages = "064015",
+    year = "2026"
 }
 ```
