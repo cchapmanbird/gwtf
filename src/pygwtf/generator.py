@@ -28,9 +28,6 @@ class AnalyticTimeFrequencyWaveform:
         inside this constructor with the chosen backend.
     config : dict
         Kernel configuration, with kwargs specific to the prescription used.
-    prescription : str, optional
-        The prescription to use for the kernel construction. Only ``'fresnel'`` is
-        currently supported.
     backend : str or Backend, optional
         Compute backend — ``'cpu'`` (default) or ``'gpu'``.
     tdi_type : {None, 2}, optional
@@ -70,7 +67,6 @@ class AnalyticTimeFrequencyWaveform:
         self,
         model_class: Type[AnalyticModel],
         config: dict,
-        prescription: str = "fresnel",
         backend: str | Backend = "cpu",
         tdi_type: int | None = None,
         channels: np.ndarray | None = None,
@@ -89,6 +85,9 @@ class AnalyticTimeFrequencyWaveform:
         self.config["nF"] = int(self.config["nF"])
         self.config["dT"] = float(self.config["dT"])
         self.config["dF"] = float(self.config["dF"])
+
+        self.config["fmin"] = float(self.config.get("fmin", self.config["dF"]))  # Default to dF if not provided, always dropping DC
+
         assert np.all(
             [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
@@ -112,7 +111,6 @@ class AnalyticTimeFrequencyWaveform:
             self.backend.xp.arange(self.config["nT"]) * self.config["dT"]
         )
 
-        # Note: includes the f=0 DC bin.
         self.f_tranche = (
             self.backend.xp.arange(self.config["nF"]) * self.config["dF"]
         )
@@ -534,6 +532,7 @@ class AnalyticTimeFrequencyWaveform:
         nF = self.config["nF"]
         dF = self.config["dF"]
 
+
         # Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``
         if parameters_response is None:
             if self.tdi_type is None:
@@ -561,6 +560,17 @@ class AnalyticTimeFrequencyWaveform:
                 psds = self.psds
                 assert psds is not None, (
                     "PSDs must be supplied to compute the statistic."
+                )
+
+            # The kernels bound frequency indices by config nF, not by the array width, and CUDA does not bounds-check,
+            # so data/PSD arrays narrower than nF are read out of bounds silently. Check the (nT, nF, n_channels) block.
+            expected_shape = (self.config["nT"], self.config["nF"], self.n_channels)
+            expected_ndim = 4 if self.gf_mode else 3
+            for name, arr in (("channels", channels), ("psds", psds)):
+                assert arr.ndim == expected_ndim and tuple(arr.shape[-3:]) == expected_shape, (
+                    f"{name} has shape {tuple(arr.shape)}, expected "
+                    f"{'(nwalkers, ' if self.gf_mode else '('}{expected_shape[0]}, {expected_shape[1]}, {expected_shape[2]}) "
+                    f"from config (nT, nF, n_channels)."
                 )
 
         # In global fit mode, data_indices maps each source to its walker, i.e. to the slice of the

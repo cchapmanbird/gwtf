@@ -29,6 +29,7 @@ def analytic_kernel_constructor(
         - dT: float, the duration of each time segment.
         - nF: int, the number of frequency bins.
         - dF: float, the width of each frequency bin.
+        - fmin: float, the central frequency of the first frequency bin (index 0) of the data grid.
         - kernel_width: int, the number of frequency bins on either side of the central frequency to include in the kernel computation.
         - nparams: int, the number of parameters describing each source. This is used to allocate local arrays in the GPU kernel.
 
@@ -70,6 +71,7 @@ def analytic_kernel_constructor(
     nF = config["nF"]
     dF = config["dF"]
     kernel_width = config["kernel_width"]
+    fmin = config["fmin"]
     nparams = config["nparams"]
 
     if block_vectorised_gpu and kernel_width != 16:
@@ -183,9 +185,12 @@ def analytic_kernel_constructor(
         if mixed_precision:
             dT_prec = np.float32(dT)
             dF_prec = np.float32(dF)
+            fmin_prec = np.float32(fmin)   # mixed_precision branch
+
         else:
             dT_prec = dT
             dF_prec = dF
+            fmin_prec = fmin               # else branch
 
         if tdi:
             # Grab response parameters for specified source if TDI response computation is needed.
@@ -211,9 +216,9 @@ def analytic_kernel_constructor(
             amp_mode = _get_amplitude(
                 t_tranche, f0_mode, fdot_mode, params_source
             )
-
+            # Note that frequencies refer to the central frequency of the bin. Fmin is assumed to be the central frequency of the first bin. 
             # Start index in frequency bins for the given mode frequency, used to determine which frequency bins to compute over in the kernel.
-            start_ind = int(f0_mode / dF)
+            start_ind = round((f0_mode-fmin_prec)/ dF)
             d_h = 0.0 + 0.0j
             h_h = 0.0 + 0.0j
 
@@ -258,8 +263,9 @@ def analytic_kernel_constructor(
                 kernel_width + extra_fdot_bins,  # + 1
             ):
                 f_idx = start_ind + f_rel_idx
-                if f_idx > 0 and f_idx < nF:
-                    f_bin = (f_idx + 1) * (dF_prec)
+                if f_idx >= 0 and f_idx < nF: 
+                    # f_bin should be on the DATA grid which does not have dc, i.e. data_grid f[0] = df.
+                    f_bin = f_idx * dF_prec  + fmin_prec
                     h_f_pos = _fresnel_kernel(
                         f_bin,
                         amp_mode_prefac,
@@ -616,7 +622,7 @@ def analytic_kernel_constructor(
                     t_tranche, f0_mode, fdot_mode, params_source
                 )
 
-                freq_ind = int(f0_mode / dF) + f_idx - kernel_width
+                freq_ind = round((f0_mode - fmin) / dF) + f_idx - kernel_width
                 d_h_here = 0.0 + 0.0j
                 h_h_here = 0.0 + 0.0j
 
@@ -638,7 +644,7 @@ def analytic_kernel_constructor(
                 one_over_fdot = 1 / fdot_mode
 
                 # NOTE: no extra fdot bins here due to block form
-                if freq_ind > 0 and freq_ind < nF:
+                if freq_ind >= 0 and freq_ind < nF:
                     f_bin = (freq_ind + 1) * (dF)
                     h_f_pos = _fresnel_kernel(
                         f_bin,

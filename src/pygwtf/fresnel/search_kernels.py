@@ -148,6 +148,7 @@ def analytic_kernel_constructor_semi_coherent(
         - dT: float, the duration of each time segment.
         - nF: int, the number of frequency bins.
         - dF: float, the width of each frequency bin.
+        - fmin: float, the central frequency of the first frequency bin (index 0) of the data grid.
         - kernel_width: int, the number of frequency bins on either side of the central frequency to include in the kernel computation.
         - nparams: int, the number of parameters describing each source. This is used to allocate local arrays in the GPU kernel.
 
@@ -179,6 +180,7 @@ def analytic_kernel_constructor_semi_coherent(
     dT = config["dT"]
     nF = config["nF"]
     dF = config["dF"]
+    fmin = config["fmin"]
     kernel_width = config["kernel_width"]
     nparams = config["nparams"]
 
@@ -271,9 +273,11 @@ def analytic_kernel_constructor_semi_coherent(
         if mixed_precision:
             dT_prec = np.float32(dT)
             dF_prec = np.float32(dF)
+            fmin_prec = np.float32(fmin)
         else:
             dT_prec = dT
             dF_prec = dF
+            fmin_prec = fmin
 
         # Grab parameters for specified source.
         for i in range(nparams):
@@ -322,8 +326,9 @@ def analytic_kernel_constructor_semi_coherent(
                     )
                 )
 
-                # Start index in frequency bins for the given mode frequency, used to determine which frequency bins to compute over in the kernel.
-                start_ind = int(f0_mode / dF)
+                # Frequencies refer to the central frequency of the bin, with fmin the central frequency of the first bin (index 0).
+                # Index of the bin nearest the mode frequency, used to centre the frequency bins computed over in the kernel.
+                start_ind = round((f0_mode - fmin_prec) / dF)
 
                 # Per-tranche inner product accumulators.
                 d_h = 0.0 + 0.0j
@@ -367,8 +372,8 @@ def analytic_kernel_constructor_semi_coherent(
                     -kernel_width, kernel_width + extra_fdot_bins + 1
                 ):
                     f_idx = start_ind + f_rel_idx
-                    if f_idx > 0 and f_idx < nF:
-                        f_bin = (f_idx + 1) * (dF_prec)
+                    if f_idx >= 0 and f_idx < nF:
+                        f_bin = f_idx * dF_prec + fmin_prec
 
                         h_f_pos = _fresnel_kernel(
                             f_bin,
