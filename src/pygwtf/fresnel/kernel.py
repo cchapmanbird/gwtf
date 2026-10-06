@@ -645,7 +645,7 @@ def analytic_kernel_constructor(
 
                 # NOTE: no extra fdot bins here due to block form
                 if freq_ind >= 0 and freq_ind < nF:
-                    f_bin = (freq_ind + 1) * (dF)
+                    f_bin = freq_ind * dF + fmin
                     h_f_pos = _fresnel_kernel(
                         f_bin,
                         amp_mode_prefac,
