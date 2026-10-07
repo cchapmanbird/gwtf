@@ -235,9 +235,6 @@ def analytic_kernel_constructor(
                     f0_mode, P_lm, k, p, Ls, n, tdi2
                 )
 
-            # Cheap way to check how many extra frequency bins to compute over for the given fdot
-            extra_fdot_bins = int((fdot_mode * dT) / dF)
-
             if mixed_precision:
                 amp_mode = np.float32(amp_mode)
                 phi0_mode = np.float32(phi0_mode % (2 * np.pi))
@@ -257,10 +254,20 @@ def analytic_kernel_constructor(
             amp_mode_prefac = amp_mode / sqrt2fdot
             one_over_fdot = 1 / fdot_mode
 
+            # Cheap way to check how many extra frequency bins to compute over for the given fdot
+            if use_midpoint: 
+                extra_fdot_bins = int((fdot_mode * dT / 2) / dF)
+                low_index = -kernel_width - extra_fdot_bins
+                high_index = kernel_width + extra_fdot_bins + 1
+            else:
+                extra_fdot_bins = int((fdot_mode * dT) / dF)
+                low_index = -kernel_width
+                high_index = kernel_width + extra_fdot_bins + 1
+
             # For each frequeny bin within the time-segment, compute the fresnel.
             for f_rel_idx in range(
-                -kernel_width,
-                kernel_width + extra_fdot_bins,  # + 1
+                low_index,
+                high_index, 
             ):
                 f_idx = start_ind + f_rel_idx
                 if f_idx >= 0 and f_idx < nF: 

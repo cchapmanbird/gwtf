@@ -359,7 +359,16 @@ def analytic_kernel_constructor_semi_coherent(
                     )
 
                 # Cheap way to check how many extra frequency bins to compute over for the given fdot.
-                extra_fdot_bins = int((fdot_mode * dT) / dF)
+                # With use_midpoint, start_ind sits at the segment-midpoint frequency, so the sweep extends fdot*dT/2 either side;
+                # otherwise start_ind is the segment-start frequency and the sweep extends fdot*dT above it.
+                if use_midpoint:
+                    extra_fdot_bins = int((fdot_mode * dT / 2) / dF)
+                    low_index = -kernel_width - extra_fdot_bins
+                    high_index = kernel_width + extra_fdot_bins + 1
+                else:
+                    extra_fdot_bins = int((fdot_mode * dT) / dF)
+                    low_index = -kernel_width
+                    high_index = kernel_width + extra_fdot_bins + 1
 
                 # Fresnel quantities (common to all frequency bins for a given source at a given time-segment)
                 # NOTE: math.sqrt, not np.sqrt -- numpy scalar ufuncs are not supported inside CUDA kernels by this numba version.
@@ -368,9 +377,7 @@ def analytic_kernel_constructor_semi_coherent(
                 one_over_fdot = 1 / fdot_mode
 
                 # For each frequency bin within the time-segment, compute the fresnel.
-                for f_rel_idx in range(
-                    -kernel_width, kernel_width + extra_fdot_bins + 1
-                ):
+                for f_rel_idx in range(low_index, high_index):
                     f_idx = start_ind + f_rel_idx
                     if f_idx >= 0 and f_idx < nF:
                         f_bin = f_idx * dF_prec + fmin_prec
