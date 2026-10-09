@@ -406,7 +406,7 @@ class AnalyticTimeFrequencyWaveform:
 
         return self._param_cache, single_source
 
-    def _compute_segment_indices(self, parameters_cache):
+    def _compute_segment_indices(self, parameters_cache, use_midpoint = True):
         """
         Derive per-source time-segment indices from the model's time bounds.
 
@@ -416,7 +416,10 @@ class AnalyticTimeFrequencyWaveform:
         ----------
         parameters_cache : ndarray, shape (n_sources, n_params + n_derived)
             The parameters with derived parameters filled in.
-
+        use_midpoint : bool, optional
+            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
+            (Default: True) 
+            
         """
         xp = self.backend.xp
         nT = self.config["nT"]
@@ -443,16 +446,26 @@ class AnalyticTimeFrequencyWaveform:
 
             segment_start_inds = xp.floor(
                 xp.asarray(t_start, dtype=np.float64) / dT
-            ).astype(np.int32)
+            ).astype(np.int32) 
 
-            segment_end_inds = xp.floor(
-                xp.asarray(t_end, dtype=np.float64) / dT
-            ).astype(np.int32)
+            # A segment that only contains the f_max crossing
+            # is dropped, otherwise f(t_mid) can sit far above f_max and the fdot*dT/2 extrapolation (extra fdot terms in the kernel)
+            # paints the whole band.
+            if use_midpoint:
+                # k here indexes the time points 
+                # (k + 1/2) dT <= t_end (rearrange to get the following for k)
+                segment_end_inds = xp.floor(t_end / dT - 0.5).astype(np.int32)
+            else:
+                # (k + 1) dT <= t_end
+                segment_end_inds = xp.floor(t_end / dT).astype(np.int32) - 1
+    
 
             # Cliping begin and end segments to be within the valid range of [0, nT-1].
             segment_start_inds = xp.clip(segment_start_inds, 0, nT - 1)
 
-            segment_end_inds = xp.clip(segment_end_inds, 0, nT - 1)
+            # end may be -1 (< start): the source leaves the band before any valid segment -> no segments.
+            # Negative segment indices are already dealt with in the kernel so it is okay. 
+            segment_end_inds = xp.clip(segment_end_inds, -1, nT - 1)
 
         return segment_start_inds, segment_end_inds
 
@@ -524,7 +537,7 @@ class AnalyticTimeFrequencyWaveform:
         n_sources = params.shape[0]
 
         segment_start_inds, segment_end_inds = self._compute_segment_indices(
-            params
+            params, use_midpoint = use_midpoint,
         )
         out_dtype = np.complex64 if mixed_precision else np.complex128
 
