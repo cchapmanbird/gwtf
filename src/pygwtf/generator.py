@@ -426,7 +426,12 @@ class AnalyticTimeFrequencyWaveform:
         dT = self.config["dT"]
         dF = self.config["dF"]
         nF = self.config["nF"]
-        frequency_band = (dF, nF * dF)
+        fmin = self.config["fmin"]
+
+        # Only used for the frequency band, which is used to compute the time bounds for each source.
+        # Remeber fmin is the central frequency of the first bin. 
+        # the last bin's upper edge is half a bin further: fmin + (nF − 1)·dF + ½dF = fmin + (nF − ½)·dF;
+        frequency_band = (fmin, fmin + (nF - 0.5)*dF)
 
         # Fill in segment start and end indices based on the model's time bounds for the given parameters and frequency band.
         #   If no bounds are returned, default to the full segment.
