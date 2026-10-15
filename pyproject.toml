@@ -39,7 +39,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["sequince*"]
+include = ["gwtf*"]
 
 [tool.setuptools_scm]
 
