@@ -114,3 +114,111 @@ def _fresnel_kernel(f_bin, amp_mode_prefactor, sqrt2fdot, phase_mode, f_mode, fd
 
     fct = amp_mode_prefactor * phase_fac * (CT - C0 + 1j * (ST - S0))
     return fct
+
+@jit
+def _fresnel_tukey_sub_integrals(delta_f_norm, sqrt2fdot, fdot_mode, T, b):
+    """
+    The Fresnel sub-integral operator F(f_eff, [tau_1, tau_2]), for a single effective
+    frequency, evaluated over each of the three regions of the Tukey window. The factor of 1/sqrt(2 * fdot_mode) is not
+    included here, it is carried by amp_mode_prefactor in the kernel below.
+
+    Parameters:
+    ----------
+    delta_f_norm: float
+        (f_eff - f_bin) / fdot_mode, where f_eff is the effective frequency of the sub-integral.
+    sqrt2fdot: float
+        The square root of 2 times the frequency derivative of the mode being evaluated.
+    fdot_mode: float
+        The frequency derivative of the mode being evaluated.
+    T: float
+        The duration of the segment being evaluated.
+    b: float
+        The start of the roll-off region, T/2 * (1 - alpha). The roll-on region ends at -b.
+
+    Returns:
+    -------
+    F_on: complex
+        The sub-integral over the roll-on region, [-T/2, -b].
+    F_flat: complex
+        The sub-integral over the flat region, [-b, b].
+    F_off: complex
+        The sub-integral over the roll-off region, [b, T/2].
+    """
+    phase_fac = exp(-1j * pi * fdot_mode * (delta_f_norm**2))
+
+    v0_C = sqrt2fdot * (-T/2 + delta_f_norm)
+    va_C = sqrt2fdot * (-b + delta_f_norm)
+    vb_C = sqrt2fdot * (b + delta_f_norm)
+    vT_C = sqrt2fdot * (T/2 + delta_f_norm)
+
+    S0, C0 = _fresnel(v0_C)
+    Sa, Ca = _fresnel(va_C)
+    Sb, Cb = _fresnel(vb_C)
+    ST, CT = _fresnel(vT_C)
+
+    F_on = phase_fac * (Ca - C0 + 1j * (Sa - S0))
+    F_flat = phase_fac * (Cb - Ca + 1j * (Sb - Sa))
+    F_off = phase_fac * (CT - Cb + 1j * (ST - Sb))
+    return F_on, F_flat, F_off
+
+
+@jit
+def _fresnel_tukey_midpoint(f_bin, amp_mode_prefactor, sqrt2fdot, phase_mode, f_mode, fdot_mode, one_over_fdot, T,
+                            alpha):
+    """
+    Tukey window fresnel waveform kernel, with the mode parameters evaluated at the midpoint of the segment.
+
+    Parameters:
+    ----------
+    f_bin: float
+        The frequency at the centre of the bin being evaluated.
+    amp_mode_prefactor: float
+        The amplitude/sqrt(2 * fdot_mode) of the mode being evaluated.
+    sqrt2fdot: float
+        The square root of 2 times the frequency derivative of the mode being evaluated.
+    phase_mode: float
+        The phase of the mode being evaluated, at the midpoint of the segment.
+    f_mode: float
+        The frequency of the mode being evaluated, at the midpoint of the segment.
+    fdot_mode: float
+        The frequency derivative of the mode being evaluated, at the midpoint of the segment.
+    one_over_fdot: float
+        The inverse of the frequency derivative of the mode being evaluated.
+    T: float
+        The duration of the segment being evaluated.
+    alpha: float
+        The Tukey taper parameter, in (0, 1]. The fraction of the segment which is tapered, alpha = 1 is a Hann window.
+        Not valid at alpha = 0, use _fresnel_kernel for the box-car window.
+
+    Returns:
+    -------
+    fct: complex
+        The Tukey windowed Fresnel waveform for the given mode, within a time-segment. Evaluated at f_bin.
+    """
+    delta_f_norm = (f_mode - f_bin) * one_over_fdot
+
+    # The cosine in the taper shifts the linear phase term by +- 1/(alpha * T), so f_eff = f_mode +- 1/(alpha * T).
+    # This only changes the (f_eff - f_bin) term, fdot_mode is unchanged.
+    delta_f_norm_shift = one_over_fdot / (alpha * T)
+
+    # Edges of the flat region are at +-b.
+    b = T/2 * (1 - alpha)
+
+    # The constant phases of the cosine in the taper, at the midpoint. These are swapped between the roll-on and roll-off.
+    phi_on = pi * (1 - alpha) / alpha
+    taper_phase_plus = 0.25 * exp(1j * phi_on)
+    taper_phase_minus = 0.25 * exp(-1j * phi_on)
+
+    F_on, F_flat, F_off = _fresnel_tukey_sub_integrals(delta_f_norm, sqrt2fdot, fdot_mode, T, b)
+    F_on_plus, _, F_off_plus = _fresnel_tukey_sub_integrals(delta_f_norm + delta_f_norm_shift, sqrt2fdot, fdot_mode, T, b)
+    F_on_minus, _, F_off_minus = _fresnel_tukey_sub_integrals(delta_f_norm - delta_f_norm_shift, sqrt2fdot, fdot_mode, T, b)
+
+    J1 = 0.5 * F_on + taper_phase_plus * F_on_plus + taper_phase_minus * F_on_minus
+    J2 = F_flat
+    J3 = 0.5 * F_off + taper_phase_minus * F_off_plus + taper_phase_plus * F_off_minus
+
+    # The extra phase factor at the end accounts for the fact that the mode parameters are evaluated at the midpoint of the segment, rather than the beginning.
+    phase_fac = exp(1j * (phase_mode - 2*pi*f_bin*T/2))
+
+    fct = amp_mode_prefactor * phase_fac * (J1 + J2 + J3)
+    return fct

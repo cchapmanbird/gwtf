@@ -61,6 +61,10 @@ class AnalyticTimeFrequencyWaveform:
            at 2 temperatures this is [0, 1, 2, 3, 0, 1, 2, 3].
         NOTE: Not supported with the semi-coherent statistic kernels, only intended use is to use the
         usual normal kernels to compute d_h and h_h.
+    use_tukey : bool, optional
+        Whether to use a Tukey window for the Fresnel kernel, or a boxcar window. Default is False.
+        If True, config must contain 'alpha', the Tukey taper parameter in (0, 1], which should match
+        the window applied to the data. The Tukey kernel is midpoint only, so use_midpoint must be True.
     """
 
     def __init__(
@@ -75,6 +79,7 @@ class AnalyticTimeFrequencyWaveform:
         spacecraft_ltts: np.ndarray | None = None,
         block_vectorised_gpu: bool = False,
         gf_mode: bool = False,
+        use_tukey: bool = False,
     ):
         self.backend = (
             get_backend(backend) if isinstance(backend, str) else backend
@@ -103,6 +108,14 @@ class AnalyticTimeFrequencyWaveform:
 
         if block_vectorised_gpu:
             assert backend == "gpu", "Block vectorised GPU kernels can only be used with GPU backend."
+
+        if use_tukey:
+            assert "alpha" in self.config, "Config must contain 'alpha' when use_tukey is True."
+            self.config["alpha"] = float(self.config["alpha"])
+            assert 0 < self.config["alpha"] <= 1, (
+                f"Tukey alpha must be in (0, 1], but got alpha={self.config['alpha']}."
+            )
+        self.use_tukey = use_tukey
 
         self.config["dt"] = 1 / (self.config["nF"] * self.config["dF"])
 
@@ -191,6 +204,7 @@ class AnalyticTimeFrequencyWaveform:
                 tdi_type=tdi_type,
                 block_vectorised_gpu=block_vectorised_gpu,
                 gf_mode = gf_mode,
+                use_tukey=use_tukey,
             )
         )
 
@@ -203,6 +217,7 @@ class AnalyticTimeFrequencyWaveform:
                 tdi_type=tdi_type,
                 block_vectorised_gpu=block_vectorised_gpu,
                 gf_mode = gf_mode,
+                use_tukey=use_tukey,
             )
         )
 
@@ -211,7 +226,7 @@ class AnalyticTimeFrequencyWaveform:
         (
             self.semi_coherent_statistic_kernel_cpu,
             self.semi_coherent_statistic_kernel_gpu,
-        ) = analytic_kernel_constructor_semi_coherent(*constructor_args)
+        ) = analytic_kernel_constructor_semi_coherent(*constructor_args, use_tukey=use_tukey)
 
         self._param_cache = None
 
@@ -537,6 +552,9 @@ class AnalyticTimeFrequencyWaveform:
             ``return_statistic=False``, or statistic ``(n_sources, nT, 2)``
             when ``return_statistic=True``.
         """
+        if self.use_tukey and not use_midpoint:
+            raise ValueError("The Tukey Fresnel kernel is midpoint only, use_midpoint must be True when use_tukey is True.")
+
         xp = self.backend.xp
         params, single_source = self._load_parameters(parameters)
         n_sources = params.shape[0]

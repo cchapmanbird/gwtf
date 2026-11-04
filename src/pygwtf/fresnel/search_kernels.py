@@ -6,7 +6,7 @@ from numba import cuda, jit, njit
 
 from ..response.transfer import fill_k, fill_P_lm
 from ..utils import complex_inner_product
-from .common import _fresnel_kernel
+from .common import _fresnel_kernel, _fresnel_tukey_midpoint
 
 
 #------------------------------------------------------------------#
@@ -130,6 +130,7 @@ def analytic_kernel_constructor_semi_coherent(
     _get_amplitude: Callable,
     _get_phi_f_fdot: Callable,
     _get_channels: Callable,
+    use_tukey: bool = False,
 ):
     '''
     Constructor method used to generate a kernel function for computing the semi-coherent detection statistic directly per source.
@@ -151,6 +152,7 @@ def analytic_kernel_constructor_semi_coherent(
         - fmin: float, the central frequency of the first frequency bin (index 0) of the data grid.
         - kernel_width: int, the number of frequency bins on either side of the central frequency to include in the kernel computation.
         - nparams: int, the number of parameters describing each source. This is used to allocate local arrays in the GPU kernel.
+        - alpha: float, the Tukey taper parameter, in (0, 1]. Only required if use_tukey is True.
 
     Following are waveform specific functions, and can be substituted for any waveform written in the same format.
     _get_amplitude: Callable
@@ -163,6 +165,10 @@ def analytic_kernel_constructor_semi_coherent(
     _get_channels: Callable
         Function that takes in frequency-domain (within each time-segment) waveforms, in the format h_lm and
         transforms to TDI channels using the detector response.
+
+    use_tukey: bool, optional
+        Whether to use a Tukey window for the Fresnel kernel, or a boxcar window. Default is False.
+        NOTE: The Tukey kernel is midpoint only, so use_midpoint must be True when calling the kernels.
 
     kernel_cpu: Callable
         A CPU kernel function that can be called to compute the per-source semi-coherent statistic.
@@ -183,6 +189,9 @@ def analytic_kernel_constructor_semi_coherent(
     fmin = config["fmin"]
     kernel_width = config["kernel_width"]
     nparams = config["nparams"]
+
+    if use_tukey:
+        tukey_alpha = config["alpha"]
 
     # Semi-coherent constructor is for TDI statistics only.
     tdi2 = True
@@ -382,17 +391,30 @@ def analytic_kernel_constructor_semi_coherent(
                     if f_idx >= 0 and f_idx < nF:
                         f_bin = f_idx * dF_prec + fmin_prec
 
-                        h_f_pos = _fresnel_kernel(
-                            f_bin,
-                            amp_mode_prefac,
-                            sqrt2fdot,
-                            phi0_mode,
-                            f0_mode,
-                            fdot_mode,
-                            one_over_fdot,
-                            dT_prec,
-                            use_midpoint,
-                        )
+                        if use_tukey:
+                            h_f_pos = _fresnel_tukey_midpoint(
+                                f_bin,
+                                amp_mode_prefac,
+                                sqrt2fdot,
+                                phi0_mode,
+                                f0_mode,
+                                fdot_mode,
+                                one_over_fdot,
+                                dT_prec,
+                                tukey_alpha,
+                            )
+                        else:
+                            h_f_pos = _fresnel_kernel(
+                                f_bin,
+                                amp_mode_prefac,
+                                sqrt2fdot,
+                                phi0_mode,
+                                f0_mode,
+                                fdot_mode,
+                                one_over_fdot,
+                                dT_prec,
+                                use_midpoint,
+                            )
 
                         # Generate AET channels via multiplicative, frequency-domain transfer function.
                         for i in range(channels.shape[-1]):

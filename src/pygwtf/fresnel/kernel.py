@@ -6,7 +6,7 @@ from numba import cuda, jit
 
 from ..response.transfer import fill_k, fill_P_lm
 from ..utils import complex_inner_product
-from .common import _fresnel_kernel
+from .common import _fresnel_kernel, _fresnel_tukey_midpoint
 
 
 def analytic_kernel_constructor(
@@ -17,8 +17,9 @@ def analytic_kernel_constructor(
     compute_statistic: bool = False,
     tdi_type: int | None = None,
     block_vectorised_gpu: bool = False,
-    gf_mode: bool = False
-):
+    gf_mode: bool = False,
+    use_tukey: bool = False,
+    ):
     """
     Constructor method used to generate a kernel function for computing Fresnel waveforms and derived inner-product statistics (d_h and h_h).
 
@@ -58,7 +59,8 @@ def analytic_kernel_constructor(
     gf_mode: bool, optional
         Whether to use global fit mode, where the data and PSD are carried per walker: the n_sources = nwalkers x ntemps
         sources are each scored against the data and PSD of their own walker, as given by data_indices. Default is False.
-
+    use_tukey: bool, optional
+        Whether to use a Tukey window for the Fresnel kernel, or a boxcar window. Default is False.
     Returns:
     -------
     kernel_cpu: Callable
@@ -74,6 +76,9 @@ def analytic_kernel_constructor(
     fmin = config["fmin"]
     nparams = config["nparams"]
 
+    if use_tukey: 
+        tukey_alpha = config["alpha"]
+    
     if block_vectorised_gpu and kernel_width != 16:
         raise ValueError(
             f"Block vectorised GPU kernel requires kernel_width=16 for now, but got kernel_width={kernel_width}."
@@ -273,17 +278,31 @@ def analytic_kernel_constructor(
                 if f_idx >= 0 and f_idx < nF: 
                     # f_bin should be on the DATA grid which does not have dc, i.e. data_grid f[0] = df.
                     f_bin = f_idx * dF_prec  + fmin_prec
-                    h_f_pos = _fresnel_kernel(
-                        f_bin,
-                        amp_mode_prefac,
-                        sqrt2fdot,
-                        phi0_mode,
-                        f0_mode,
-                        fdot_mode,
-                        one_over_fdot,
-                        dT_prec,
-                        use_midpoint,
-                    )
+
+                    if use_tukey:
+                        h_f_pos = _fresnel_tukey_midpoint(
+                            f_bin,
+                            amp_mode_prefac,
+                            sqrt2fdot,
+                            phi0_mode,
+                            f0_mode,
+                            fdot_mode,
+                            one_over_fdot,
+                            dT_prec,
+                            tukey_alpha, 
+                        )
+                    else:
+                        h_f_pos = _fresnel_kernel(
+                            f_bin,
+                            amp_mode_prefac,
+                            sqrt2fdot,
+                            phi0_mode,
+                            f0_mode,
+                            fdot_mode,
+                            one_over_fdot,
+                            dT_prec,
+                            use_midpoint,
+                        )
                     # Generate just the polarizations
                     if not tdi:
                         h_TT = _get_channels(h_f_pos, params_source)
@@ -653,17 +672,31 @@ def analytic_kernel_constructor(
                 # NOTE: no extra fdot bins here due to block form
                 if freq_ind >= 0 and freq_ind < nF:
                     f_bin = freq_ind * dF + fmin
-                    h_f_pos = _fresnel_kernel(
-                        f_bin,
-                        amp_mode_prefac,
-                        sqrt2fdot,
-                        phi0_mode,
-                        f0_mode,
-                        fdot_mode,
-                        one_over_fdot,
-                        dT,
-                        use_midpoint,
-                    )
+
+                    if use_tukey:
+                        h_f_pos = _fresnel_tukey_midpoint(
+                            f_bin,
+                            amp_mode_prefac,
+                            sqrt2fdot,
+                            phi0_mode,
+                            f0_mode,
+                            fdot_mode,
+                            one_over_fdot,
+                            dT,
+                            tukey_alpha, 
+                        )
+                    else:
+                        h_f_pos = _fresnel_kernel(
+                            f_bin,
+                            amp_mode_prefac,
+                            sqrt2fdot,
+                            phi0_mode,
+                            f0_mode,
+                            fdot_mode,
+                            one_over_fdot,
+                            dT,
+                            use_midpoint,
+                        )
 
                     if not tdi:
                         h_TT = _get_channels(h_f_pos, params_source)
