@@ -17,6 +17,7 @@ Features:
 - Contains search-specific implementation of semi-coherent detection statistic, designed to minimise memory use and maximise batching of sources (only valid for single mode waveforms).
 - Response function that generalises to slowly varying arm-lengths.
 - Response can use either analytic or supplied orbits (Mojito-orbit reading in functionality is present and functional but somewhat crude).
+- Supports modelling of both box-car and tukey-window in the time-frequency Fresnel representation.
 
 Waveforms Supported:
 --------
