@@ -5,6 +5,8 @@ from numba import njit
 
 from ..constants import clight
 
+# Polarisation convention 
+POL_CONVENTION = 1   # +1: arXiv:2003.00357 convention, -1: Mojito convention
 
 @njit
 def Ylms(cosi, phi):
@@ -90,7 +92,7 @@ def fill_P_lm(P_lm, parameters):
     Pc21 = cbcl
     Pc22 = 0
 
-    expn = exp(-2j * pol)
+    expn = POL_CONVENTION*exp(-2j * pol)
 
     part = expn * (Pp00 + 1j * Pc00)
     P_lm[0, 0] = 0.5 * (Y_lm_22 * part + (Y_lm_2minus2 * part).conjugate())
