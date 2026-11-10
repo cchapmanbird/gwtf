@@ -6,7 +6,7 @@ from numba import njit
 from ..constants import clight
 
 # Polarisation convention 
-POL_CONVENTION = 1   # +1: arXiv:2003.00357 convention, -1: Mojito convention
+POL_CONVENTION = -1   # +1: arXiv:2003.00357 convention, -1: Mojito convention
 
 @njit
 def Ylms(cosi, phi):
