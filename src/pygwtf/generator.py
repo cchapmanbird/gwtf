@@ -503,6 +503,7 @@ class AnalyticTimeFrequencyWaveform:
         mixed_precision: bool = False,
         use_midpoint: bool = True,
         data_indices: np.ndarray | None = None,
+        invC_prefolded: bool = False,
     ):
         """Evaluate the analytic waveform/inner-product statistic/search statistic.
 
@@ -546,6 +547,10 @@ class AnalyticTimeFrequencyWaveform:
             channels and psds. Required when gf_mode is True, and must be None otherwise. With
             nwalkers=4 walkers at ntemps=2 temperatures the n_sources=8 parameter vectors are laid
             out walker-fastest, so this is [0, 1, 2, 3, 0, 1, 2, 3].
+        invC_prefolded : bool, optional
+            If True, invC already includes the 4*dF inner-product factor and is passed to the kernels
+            as-is. Lets callers that reuse one invC over many calls (e.g. a global-fit move) fold it once
+            instead of paying a full-size multiply and copy per call. Default False: fold here.
         Returns
         -------
         ndarray
@@ -661,7 +666,8 @@ class AnalyticTimeFrequencyWaveform:
             # since h_h needs the full invC anyway. i,j are the channel indices {A,E,T}
             #  
             #<d|h> = 4 * dF * d_{i}(f)^* invC_{ij}(f) h_{j}(f) = [4*dF * d_{i}(f)^* invC_{ij}(f)) h_{j](f) 
-            inv_covariances = invC * 4 * dF
+            # Skipped if the caller already folded it (invC_prefolded=True): avoids a full-size copy per call.
+            inv_covariances = invC if invC_prefolded else invC * 4 * dF
 
 
             # Branch: Compute d_h and h_h per segment.
