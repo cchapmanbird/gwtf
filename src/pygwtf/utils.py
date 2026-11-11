@@ -18,7 +18,8 @@ def complex_inner_product(h1, h2, inv_psd):
     inv_psd : array_like or float
         Reciprocal (1/psd) of the power spectral density of the noise. Prefolded
         outside the kernel so the inner loop multiplies instead of dividing
-        (fp64 division is far slower than multiply on GPU).
+        (fp64 division is far slower than multiply on GPU). 
+        Also multiplied by 4*df, where df is the frequency bin width, so that the inner product is properly normalized.
     Returns
     -------
     array_like or float
@@ -26,3 +27,38 @@ def complex_inner_product(h1, h2, inv_psd):
 
     '''
     return h1.conjugate() * h2 * inv_psd
+
+@jit
+def complex_inner_product_full_invC(h1, h2, invC):
+    '''
+    Usual noise-weighted inner product between two time-series in the frequency domain.
+    Base of every statistic.
+
+    NOTE: Assumes inv_psd is 1/psd* 4*df. 
+
+    Parameters
+    ----------
+    h1 : array_like or float
+        First time-series in the frequency domain.
+    h2 : array_like or float
+        Second time-series in the frequency domain.
+    invC : array_like 
+        Inverse of the covariance matrix of the noise. Prefolded
+        outside the kernel so the inner loop multiplies instead of dividing
+        (fp64 division is far slower than multiply on GPU).
+        Also multiplied by 4*df, where df is the frequency bin width, so that the inner product is properly normalized.
+
+    Returns
+    -------
+    array_like or float
+        Noise-weighted inner product of the two time-series.
+
+    '''
+    accumulated_inner_product = 0j
+    for channel_i in range(invC.shape[0]):
+
+        hi = h1[channel_i].conjugate()
+        for channel_j in range(invC.shape[1]):
+            accumulated_inner_product += hi * invC[channel_i, channel_j] * h2[channel_j]
+
+    return accumulated_inner_product

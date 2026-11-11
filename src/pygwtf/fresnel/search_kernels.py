@@ -5,7 +5,7 @@ import numpy as np
 from numba import cuda, jit, njit
 
 from ..response.transfer import fill_k, fill_P_lm
-from ..utils import complex_inner_product
+from ..utils import complex_inner_product_full_invC
 from .common import _fresnel_kernel, _fresnel_tukey_midpoint
 
 
@@ -211,10 +211,11 @@ def analytic_kernel_constructor_semi_coherent(
         n,
         p,
         Ls,
+        h_vec,
         spacecraft_ltts,
         spacecraft_orbits,
         statistic,
-        inv_psds,
+        invC,
         Nseg,
         mixed_precision,
         use_midpoint,
@@ -258,6 +259,9 @@ def analytic_kernel_constructor_semi_coherent(
             Position vectors for each spacecraft at each time-segment, used for TDI response computation.
         Ls: array (3,) (array to be filled in within the kernel)
             Arm lengths for each spacecraft at each time-segment, used for TDI response computation.
+        h_vec: complex array (3,) (array to be filled in within the kernel)
+            Scratch buffer holding the waveform in every channel at the current (t, f) bin, so the
+            full-invC inner products can couple channels.
         spacecraft_ltts: array (nT, 3)
             Light travel times for each spacecraft, used for TDI response computation.
             Used to fill in the Ls array within the kernel for TDI response computation.
@@ -268,8 +272,9 @@ def analytic_kernel_constructor_semi_coherent(
             NOTE: Precomputed, not computed in the kernel at runtime.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for the given source.
-        inv_psds: array (nT, nF, n_channels)
-            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the semi-coherent statistic.
+        invC: array (nT, nF, n_channels, n_channels)
+            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
+            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
@@ -417,14 +422,16 @@ def analytic_kernel_constructor_semi_coherent(
                             )
 
                         # Generate AET channels via multiplicative, frequency-domain transfer function.
+                        # Buffer all channels first, since the full invC couples them.
                         for i in range(channels.shape[-1]):
-                            h = h_f_pos * transfer_functions[i]
+                            h_vec[i] = h_f_pos * transfer_functions[i]
 
-                            # Extract data and inverse psd for this time-frequency bin and channel, and accumulate the per-tranche statistic.
-                            d = channels[t_idx, f_idx, i]
-                            inv_psd = inv_psds[t_idx, f_idx, i]
-                            d_h += complex_inner_product(d, h, inv_psd)
-                            h_h += complex_inner_product(h, h, inv_psd)
+                        # Accumulate this (t, f) bin's d^dagger invC h and h^dagger invC h over all channels.
+                        d_vec = channels[t_idx, f_idx, :]
+                        invC_tf = invC[t_idx, f_idx, :, :]
+                        d_h += complex_inner_product_full_invC(d_vec, h_vec, invC_tf)
+                        # Real for Hermitian invC; take .real to drop round-off imaginary parts.
+                        h_h += complex_inner_product_full_invC(h_vec, h_vec, invC_tf).real
 
                 # Add the per-tranche statistics to the per-segment statistic.
                 d_h_seg += d_h
@@ -445,7 +452,7 @@ def analytic_kernel_constructor_semi_coherent(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        inv_psds,
+        invC,
         Nseg,
         mixed_precision,
         use_midpoint,
@@ -476,8 +483,9 @@ def analytic_kernel_constructor_semi_coherent(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for each source.
-        inv_psds: array (nT, nF, n_channels)
-            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the semi-coherent statistic.
+        invC: array (nT, nF, n_channels, n_channels)
+            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
+            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
@@ -499,6 +507,8 @@ def analytic_kernel_constructor_semi_coherent(
             n = cuda.local.array((3, 3), dtype=parameters_response.dtype)
             p = cuda.local.array((3, 3), dtype=spacecraft_orbits.dtype)
             Ls = cuda.local.array((3,), dtype=spacecraft_ltts.dtype)
+            # Per-(t, f) waveform across channels, for the full-invC inner products.
+            h_vec = cuda.local.array((3,), dtype=np.complex128)
             params_source_response = cuda.local.array(
                 4, dtype=parameters.dtype
             )
@@ -516,10 +526,11 @@ def analytic_kernel_constructor_semi_coherent(
                 n,
                 p,
                 Ls,
+                h_vec,
                 spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
-                inv_psds,
+                invC,
                 Nseg,
                 mixed_precision,
                 use_midpoint,
@@ -535,7 +546,7 @@ def analytic_kernel_constructor_semi_coherent(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        inv_psds,
+        invC,
         Nseg,
         mixed_precision,
         use_midpoint,
@@ -565,8 +576,9 @@ def analytic_kernel_constructor_semi_coherent(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for each source.
-        inv_psds: array (nT, nF, n_channels)
-            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. 
+        invC: array (nT, nF, n_channels, n_channels)
+            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
+            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
@@ -582,6 +594,8 @@ def analytic_kernel_constructor_semi_coherent(
             n = np.zeros((3, 3), dtype=parameters_response.dtype)
             p = np.zeros((3, 3), dtype=spacecraft_orbits.dtype)
             Ls = np.zeros((3,), dtype=spacecraft_ltts.dtype)
+            # Per-(t, f) waveform across channels, for the full-invC inner products.
+            h_vec = np.zeros((3,), dtype=np.complex128)
             params_source_response = np.zeros(4, dtype=parameters.dtype)
             kernel_inner(
                 src_num,
@@ -597,10 +611,11 @@ def analytic_kernel_constructor_semi_coherent(
                 n,
                 p,
                 Ls,
+                h_vec,
                 spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
-                inv_psds,
+                invC,
                 Nseg,
                 mixed_precision,
                 use_midpoint,

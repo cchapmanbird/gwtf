@@ -36,8 +36,8 @@ class AnalyticTimeFrequencyWaveform:
     channels : array_like, optional
         Pre-computed data array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
         Required for statistic evaluation if not supplied at call time.
-    psds : array_like, optional
-        Pre-computed PSD array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
+    invC : array_like, optional
+        Pre-computed inverse covariance matrix array of shape ``(nT, nF, n_channels, n_channels)`` or ``(nwalkers, nT, nF, n_channels, n_channels)`` (gf_mode).
         Required for statistic evaluation if not supplied at call time.
     spacecraft_orbits : array_like, optional
         Pre-computed spacecraft orbits array of shape ``(nT, 3,
@@ -74,7 +74,7 @@ class AnalyticTimeFrequencyWaveform:
         backend: str | Backend = "cpu",
         tdi_type: int | None = None,
         channels: np.ndarray | None = None,
-        psds: np.ndarray | None = None,
+        invC: np.ndarray | None = None,
         spacecraft_orbits: np.ndarray | None = None,
         spacecraft_ltts: np.ndarray | None = None,
         block_vectorised_gpu: bool = False,
@@ -98,12 +98,12 @@ class AnalyticTimeFrequencyWaveform:
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
 
         # Check if in global fit mode, check shapes of PSD and array
-        if gf_mode and channels is not None and psds is not None:
+        if gf_mode and channels is not None and invC is not None:
             assert len(channels.shape) == 4, (
-                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and psds must correspond to a PSD array of shape (nwalkers, nT, nF, n_channels)."
+                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and invC must correspond to an inverse covariance matrix of shape (nwalkers, nT, nF, n_channels, n_channels)."
             )
-            assert len(psds.shape) == 4, (
-                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and psds must correspond to a PSD array of shape (nwalkers, nT, nF, n_channels)."
+            assert len(invC.shape) == 5, (
+                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and invC must correspond to an inverse covariance matrix of shape (nwalkers, nT, nF, n_channels, n_channels)."
             )
 
         if block_vectorised_gpu:
@@ -246,9 +246,9 @@ class AnalyticTimeFrequencyWaveform:
                 assert channels.shape[1:] == expected_shape, (
                     f"In global fit mode, channels must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels})"
                 )
-            if psds is not None:
-                assert psds.shape[1:] == expected_shape, (
-                    f"In global fit mode, psds must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels})"
+            if invC is not None:
+                assert invC.shape[1:-1] == expected_shape, (
+                    f"In global fit mode, invC must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels}, {self.n_channels})"
                 )
         else:
             if channels is not None:
@@ -260,17 +260,18 @@ class AnalyticTimeFrequencyWaveform:
                     f"Channels array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
                 )
 
-            if psds is not None:
-                assert psds.shape == (
+            if invC is not None:
+                assert invC.shape == (
                     self.config["nT"],
                     self.config["nF"],
                     self.n_channels,
+                    self.n_channels,
                 ), (
-                    f"PSDs array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
+                    f"invC array must have shape {(self.config['nT'], self.config['nF'], self.n_channels, self.n_channels)}"
                 )
 
         self.channels = channels
-        self.psds = psds
+        self.invC = invC
 
         self.block_vectorised_gpu = block_vectorised_gpu
 
@@ -493,7 +494,7 @@ class AnalyticTimeFrequencyWaveform:
         self,
         parameters: dict | np.ndarray,
         channels: np.ndarray | None = None,
-        psds: np.ndarray | None = None,
+        invC: np.ndarray | None = None,
         parameters_response: np.ndarray | None = None,
         out: np.ndarray | None = None,
         compute_statistic: bool = False,
@@ -511,11 +512,11 @@ class AnalyticTimeFrequencyWaveform:
             Source parameters as a named dict or a 2-D array in model order.
         channels : array_like or None
             Data array of shape ``(nT, nF, n_channels)``, or ``(nwalkers, nT, nF, n_channels)`` if gf_mode is True.
-        psds : array_like, optional
-            Power spectral densities, shape ``(nT, nF, n_channels)``, or
-            ``(nwalkers, nT, nF, n_channels)`` if gf_mode is True.
+        invC : array_like or None
+            Inverse covariance matrix of shape ``(nT, nF, n_channels, n_channels)``, or
+            ``(nwalkers, nT, nF, n_channels, n_channels)`` if gf_mode is True.
             Required for statistic output. If not supplied
-            will use the stored psds from initialisation.
+            will use the stored invC from initialisation.
         parameters_response : array_like, shape (n_sources, 4), optional
             Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``.
             Required when using TDI.
@@ -592,21 +593,25 @@ class AnalyticTimeFrequencyWaveform:
                 assert channels is not None, (
                     "Channels must be supplied to compute the statistic."
                 )
-            if psds is None:
-                psds = self.psds
-                assert psds is not None, (
-                    "PSDs must be supplied to compute the statistic."
+            if invC is None:
+                invC = self.invC
+                assert invC is not None, (
+                    "invC must be supplied to compute the statistic."
                 )
 
             # The kernels bound frequency indices by config nF, not by the array width, and CUDA does not bounds-check,
-            # so data/PSD arrays narrower than nF are read out of bounds silently. Check the (nT, nF, n_channels) block.
-            expected_shape = (self.config["nT"], self.config["nF"], self.n_channels)
-            expected_ndim = 4 if self.gf_mode else 3
-            for name, arr in (("channels", channels), ("psds", psds)):
-                assert arr.ndim == expected_ndim and tuple(arr.shape[-3:]) == expected_shape, (
+            # so data/invC arrays narrower than nF are read out of bounds silently.
+            # Check channels against (nT, nF, n_channels) and invC against (nT, nF, n_channels, n_channels),
+            # each with a leading nwalkers axis in gf_mode.
+            data_shape = (self.config["nT"], self.config["nF"], self.n_channels)
+            lead = 1 if self.gf_mode else 0
+            for name, arr, expected_shape in (
+                ("channels", channels, data_shape),
+                ("invC", invC, data_shape + (self.n_channels,)),
+            ):
+                assert arr.ndim == lead + len(expected_shape) and tuple(arr.shape[lead:]) == expected_shape, (
                     f"{name} has shape {tuple(arr.shape)}, expected "
-                    f"{'(nwalkers, ' if self.gf_mode else '('}{expected_shape[0]}, {expected_shape[1]}, {expected_shape[2]}) "
-                    f"from config (nT, nF, n_channels)."
+                    f"{'(nwalkers, ' if self.gf_mode else '('}{', '.join(map(str, expected_shape))}) from config."
                 )
 
         # In global fit mode, data_indices maps each source to its walker, i.e. to the slice of the
@@ -627,9 +632,9 @@ class AnalyticTimeFrequencyWaveform:
                 f"data_indices must have shape {(n_sources,)}, got {tuple(data_indices.shape)}."
             )
             nwalkers = channels.shape[0]
-            assert psds.shape[0] == nwalkers, (
-                f"In global fit mode there must be one PSD per walker: channels has "
-                f"{nwalkers} walkers but psds has {psds.shape[0]}."
+            assert invC.shape[0] == nwalkers, (
+                f"In global fit mode there must be one invC per walker: channels has "
+                f"{nwalkers} walkers but invC has {invC.shape[0]}."
             )
             assert (
                 0 <= int(data_indices.min()) and int(data_indices.max()) < nwalkers
@@ -652,12 +657,12 @@ class AnalyticTimeFrequencyWaveform:
                     (n_sources, 4), dtype=np.float64
                 )
 
-            # Prefold the PSD: pass 1/psd to the kernels so the inner-product inner
-            # loop multiplies instead of dividing (fp64 division is much slower than
-            # multiply on GPU). Computed once here per call rather than per bin.
+            # Fold 4*dF into the inverse covariance once here; the kernels carry invC (not d*invC),
+            # since h_h needs the full invC anyway. i,j are the channel indices {A,E,T}
+            #  
+            #<d|h> = 4 * dF * d_{i}(f)^* invC_{ij}(f) h_{j}(f) = [4*dF * d_{i}(f)^* invC_{ij}(f)) h_{j](f) 
+            inv_covariances = invC * 4 * dF
 
-            # Also multiply by 4*dF here to save cost in the inner-product
-            inv_psds = 1.0 / psds * 4 * dF
 
             # Branch: Compute d_h and h_h per segment.
             # NOTE: This is the usual default branch for Global-fit. 
@@ -683,7 +688,7 @@ class AnalyticTimeFrequencyWaveform:
                     self.spacecraft_orbits,
                     self.spacecraft_ltts,
                     out,
-                    inv_psds,
+                    inv_covariances,
                     mixed_precision,
                     use_midpoint,
                     data_indices,
@@ -713,7 +718,7 @@ class AnalyticTimeFrequencyWaveform:
                     self.spacecraft_orbits,
                     self.spacecraft_ltts,
                     search_statistic,
-                    inv_psds,
+                    inv_covariances,
                     N_seg,
                     mixed_precision,
                     use_midpoint,

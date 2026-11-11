@@ -5,7 +5,7 @@ import numpy as np
 from numba import cuda, jit
 
 from ..response.transfer import fill_k, fill_P_lm
-from ..utils import complex_inner_product
+from ..utils import complex_inner_product, complex_inner_product_full_invC  
 from .common import _fresnel_kernel, _fresnel_tukey_midpoint
 
 
@@ -116,10 +116,11 @@ def analytic_kernel_constructor(
         n,
         p,
         Ls,
+        h_vec,
         spacecraft_ltts,
         spacecraft_orbits,
         statistic,
-        inv_psds,
+        invC,
         mixed_precision,
         use_midpoint,# TODO: move this outside into analytic kernel constructor
         data_indices,
@@ -160,6 +161,9 @@ def analytic_kernel_constructor(
             Position vectors for each spacecraft at each time-segment, used for TDI response computation.
         Ls: array (3) (array to be filled in within the kernel)
             Arm lengths for each spacecraft at each time-segment, used for TDI response computation.
+        h_vec: complex array (3,) (array to be filled in within the kernel)
+            Scratch buffer holding the waveform in every channel at the current (t, f) bin, so the
+            full-invC inner products can couple channels. Only used if compute_statistic is True.
         spacecraft_ltts: array (nT, 3) or None
             Light travel times for each spacecraft, used for TDI response computation if tdi is True
             Used to fill in the Ls array within the kernel for TDI response computation.
@@ -170,8 +174,9 @@ def analytic_kernel_constructor(
             NOTE: Precomputed, not computed in the kernel at runtime.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h) for each time-segment for the given source.
-        inv_psds: array (nT, nF, n_channels) or None or (nwalkers, nT, nF, n_channels) if global_fit_mode is True
-            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing.
+        invC: array (nT, nF, n_channels, n_channels) or (nwalkers, nT, nF, n_channels, n_channels) if global_fit_mode is True
+            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
+            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         use_midpoint : bool
@@ -179,7 +184,7 @@ def analytic_kernel_constructor(
             (Should be set to True in almost all circumstances)
         data_indices: array (n_sources = nwalkers x ntemps,)
             Maps each source to its walker: source index -> index into the leading axis of both
-            channels and inv_psds. Only read when global_fit_mode is True; otherwise a dummy
+            channels and invC. Only read when global_fit_mode is True; otherwise a dummy
             1-element array is passed, since None cannot be marshalled as a CUDA kernel argument.
         """
         # Grab parameters for specified source.
@@ -308,28 +313,35 @@ def analytic_kernel_constructor(
                         h_TT = _get_channels(h_f_pos, params_source)
 
                     # Generate AET channels via multiplicative, frequency-domain transfer function.
+                    # In statistic mode all channels are buffered in h_vec first, since the full invC couples all channels;
+                    # in waveform mode each channel is written straight out.
                     for i in range(channels.shape[-1]):
                         if tdi:
                             h = h_f_pos * transfer_functions[i]
                         else:
+                            # Polarisations not TDI
                             h = h_TT[i]
 
-                        # If compute_statistic is True, compute the inner products for d_h and h_h using the data in channels and the computed waveform h, and the inverse psd in inv_psds.
-                        # global_fit_mode is a special mode where each walker in a global fit carries its own data (channels array) and inverse psd (inv_psds array),
-                        # both of shape (nwalkers, nT, nF, n_channels). The batch of sources is larger than nwalkers (n_sources = nwalkers x ntemps), so
-                        # data_indices maps this source back to its walker, and the same index is used for both the data and the inverse psd.
                         if compute_statistic:
-                            if global_fit_mode:
-                                data_index = data_indices[src_num]
-                                d = channels[data_index, t_idx, f_idx, i]
-                                inv_psd = inv_psds[data_index, t_idx, f_idx, i]
-                            else: 
-                                d = channels[t_idx, f_idx, i]
-                                inv_psd = inv_psds[t_idx, f_idx, i]
-                            d_h += complex_inner_product(d, h, inv_psd)
-                            h_h += complex_inner_product(h, h, inv_psd)
+                            h_vec[i] = h
                         else:
                             channels[src_num, t_idx, f_idx, i] = h
+
+                    # If compute_statistic is True, compute d_h = d^dagger invC h and h_h = h^dagger invC h over all channels for this (t, f) bin.
+                    # global_fit_mode is a special mode where each walker in a global fit carries its own data (channels array) and inverse covariance (invC array),
+                    # of shapes (nwalkers, nT, nF, n_channels) and (nwalkers, nT, nF, n_channels, n_channels). The batch of sources is larger than nwalkers (n_sources = nwalkers x ntemps), so
+                    # data_indices maps this source back to its walker, and the same index is used for both the data and the inverse covariance.
+                    if compute_statistic:
+                        if global_fit_mode:
+                            data_index = data_indices[src_num]
+                            d_vec = channels[data_index, t_idx, f_idx, :]
+                            invC_tf = invC[data_index, t_idx, f_idx, :, :]
+                        else:
+                            d_vec = channels[t_idx, f_idx, :]
+                            invC_tf = invC[t_idx, f_idx, :, :]
+                        d_h += complex_inner_product_full_invC(d_vec, h_vec, invC_tf)
+                        # Real for Hermitian invC; take .real to drop round-off imaginary parts.
+                        h_h += complex_inner_product_full_invC(h_vec, h_vec, invC_tf).real
 
             if compute_statistic:
                 statistic[src_num, t_idx, 0] = d_h
@@ -345,7 +357,7 @@ def analytic_kernel_constructor(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        inv_psds,
+        invC,
         mixed_precision,
         use_midpoint,
         data_indices,
@@ -379,8 +391,9 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h for each time-segment for the given source.
-        inv_psds: array (nT, nF, n_channels) or (nwalkers, nT, nF, n_channels) if global_fit_mode is True or None
-            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array (nT, nF, n_channels, n_channels) or (nwalkers, nT, nF, n_channels, n_channels) if global_fit_mode is True
+            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
+            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         use_midpoint : bool
@@ -388,7 +401,7 @@ def analytic_kernel_constructor(
             (Should be set to True in almost all circumstances)
         data_indices: array (n_sources = nwalkers x ntemps,)
             Maps each source to its walker: source index -> index into the leading axis of both
-            channels and inv_psds. Only read when global_fit_mode is True; otherwise a dummy
+            channels and invC. Only read when global_fit_mode is True; otherwise a dummy
             1-element array is passed, since None cannot be marshalled as a CUDA kernel argument.
         """
         # one source per thread
@@ -402,6 +415,8 @@ def analytic_kernel_constructor(
             n = cuda.local.array((3, 3), dtype=parameters_response.dtype)
             p = cuda.local.array((3, 3), dtype=spacecraft_orbits.dtype)
             Ls = cuda.local.array((3,), dtype=spacecraft_ltts.dtype)
+            # Per-(t, f) waveform across channels, for the full-invC inner products.
+            h_vec = cuda.local.array((3,), dtype=np.complex128)
             params_source_response = cuda.local.array(
                 4, dtype=parameters_response.dtype
             )
@@ -419,10 +434,11 @@ def analytic_kernel_constructor(
                 n,
                 p,
                 Ls,
+                h_vec,
                 spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
-                inv_psds,
+                invC,
                 mixed_precision,
                 use_midpoint,
                 data_indices,
@@ -438,7 +454,7 @@ def analytic_kernel_constructor(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        inv_psds,
+        invC,
         mixed_precision,
         use_midpoint,
         data_indices,
@@ -471,8 +487,9 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h for each time-segment for the given source.
-        inv_psds: array (nT, nF, n_channels) or (nwalkers, nT, nF, n_channels) if global_fit_mode is True or None
-            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array (nT, nF, n_channels, n_channels) or (nwalkers, nT, nF, n_channels, n_channels) if global_fit_mode is True
+            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
+            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         use_midpoint : bool
@@ -480,7 +497,7 @@ def analytic_kernel_constructor(
             (Should be set to True in almost all circumstances)
         data_indices: array (n_sources = nwalkers x ntemps,)
             Maps each source to its walker: source index -> index into the leading axis of both
-            channels and inv_psds. Only read when global_fit_mode is True; otherwise a dummy
+            channels and invC. Only read when global_fit_mode is True; otherwise a dummy
             1-element array is passed, since None cannot be marshalled as a CUDA kernel argument.
         """
 
@@ -491,6 +508,8 @@ def analytic_kernel_constructor(
             n = np.zeros((3, 3), dtype=parameters_response.dtype)
             p = np.zeros((3, 3), dtype=spacecraft_orbits.dtype)
             Ls = np.zeros((3,), dtype=spacecraft_ltts.dtype)
+            # Per-(t, f) waveform across channels, for the full-invC inner products.
+            h_vec = np.zeros((3,), dtype=np.complex128)
             params_source_response = np.zeros(
                 4, dtype=parameters_response.dtype
             )
@@ -508,10 +527,11 @@ def analytic_kernel_constructor(
                 n,
                 p,
                 Ls,
+                h_vec,
                 spacecraft_ltts,
                 spacecraft_orbits,
                 statistic,
-                inv_psds,
+                invC,
                 mixed_precision,
                 use_midpoint,
                 data_indices,
@@ -528,7 +548,7 @@ def analytic_kernel_constructor(
         spacecraft_orbits,
         spacecraft_ltts,
         statistic,
-        inv_psds,
+        invC,
         mixed_precision,
         use_midpoint,
         data_indices,
@@ -567,8 +587,9 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Array to store the computed statistics: [..., 0] holds d_h and [..., 1] holds h_h for each time-segment of the given source.
-        inv_psds: array (nT, nF, n_channels) or (nwalkers, nT, nF, n_channels) if global_fit_mode is True or None
-            The reciprocal (1/psd) of the noise PSD, prefolded outside the kernel so the inner-product loop multiplies instead of dividing. Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array (nT, nF, n_channels, n_channels) or (nwalkers, nT, nF, n_channels, n_channels) if global_fit_mode is True
+            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
+            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
         mixed_precision: bool 
             NOTE this is not currently implemented for the block-vectorised kernel.
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
@@ -577,7 +598,7 @@ def analytic_kernel_constructor(
             (Should be set to True in almost all circumstances)
         data_indices: array (n_sources = nwalkers x ntemps,)
             Maps each source to its walker: source index -> index into the leading axis of both
-            channels and inv_psds. Only read when global_fit_mode is True; otherwise a dummy
+            channels and invC. Only read when global_fit_mode is True; otherwise a dummy
             1-element array is passed, since None cannot be marshalled as a CUDA kernel argument.
 
         Notes:
@@ -607,6 +628,8 @@ def analytic_kernel_constructor(
                 n = cuda.local.array((3, 3), dtype=parameters_response.dtype)
                 p = cuda.local.array((3, 3), dtype=spacecraft_orbits.dtype)
                 Ls = cuda.local.array((3,), dtype=spacecraft_ltts.dtype)
+                # Per-thread (t, f) waveform across channels, for the full-invC inner products.
+                h_vec = cuda.local.array((3,), dtype=np.complex128)
                 params_source_response = cuda.local.array(
                     4, dtype=parameters_response.dtype
                 )
@@ -708,22 +731,27 @@ def analytic_kernel_constructor(
                         else:
                             h = h_TT[i]
 
-                        # If compute_statistic is True, compute the inner products for d_h and h_h using the data in channels and the computed waveform h, and the inverse psd in inv_psds.
+                        # Statistic mode: buffer all channels first (full invC couples them). Waveform mode: write out directly.
                         if compute_statistic:
-                            # global_fit_mode is a special mode where each walker in a global fit carries its own data (channels array) and inverse psd (inv_psds array),
-                            # both of shape (nwalkers, nT, nF, n_channels). data_indices maps this source (one of n_sources = nwalkers x ntemps) back to its walker.
-                            if global_fit_mode:
-                                data_index = data_indices[src_num]
-                                d = channels[data_index, t_idx, freq_ind, i]
-                                inv_psd = inv_psds[data_index, t_idx, freq_ind, i]
-                            else:
-                                d = channels[t_idx, freq_ind, i]
-                                inv_psd = inv_psds[t_idx, freq_ind, i]
-
-                            d_h_here += complex_inner_product(d, h, inv_psd)
-                            h_h_here += complex_inner_product(h, h, inv_psd)
+                            h_vec[i] = h
                         else:
                             channels[src_num, t_idx, freq_ind, i] = h
+
+                    # If compute_statistic is True, this thread's (t, f) contribution: d^dagger invC h and h^dagger invC h over all channels.
+                    if compute_statistic:
+                        # global_fit_mode is a special mode where each walker in a global fit carries its own data (channels array) and inverse covariance (invC array),
+                        # of shapes (nwalkers, nT, nF, n_channels) and (nwalkers, nT, nF, n_channels, n_channels). data_indices maps this source (one of n_sources = nwalkers x ntemps) back to its walker.
+                        if global_fit_mode:
+                            data_index = data_indices[src_num]
+                            d_vec = channels[data_index, t_idx, freq_ind, :]
+                            invC_tf = invC[data_index, t_idx, freq_ind, :, :]
+                        else:
+                            d_vec = channels[t_idx, freq_ind, :]
+                            invC_tf = invC[t_idx, freq_ind, :, :]
+
+                        d_h_here += complex_inner_product_full_invC(d_vec, h_vec, invC_tf)
+                        # Real for Hermitian invC; take .real to drop round-off imaginary parts.
+                        h_h_here += complex_inner_product_full_invC(h_vec, h_vec, invC_tf).real
 
                 if compute_statistic:
 
