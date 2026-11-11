@@ -36,9 +36,13 @@ class AnalyticTimeFrequencyWaveform:
     channels : array_like, optional
         Pre-computed data array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
         Required for statistic evaluation if not supplied at call time.
+    psds : array_like, optional
+        Diagonal noise: pre-computed PSD array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
+        Selects the diagonal-noise kernels (the default, fastest path). Pass either psds or invC, not both.
     invC : array_like, optional
-        Pre-computed inverse covariance matrix array of shape ``(nT, nF, n_channels, n_channels)`` or ``(nwalkers, nT, nF, n_channels, n_channels)`` (gf_mode).
-        Required for statistic evaluation if not supplied at call time.
+        Full noise: pre-computed inverse covariance matrix array of shape ``(nT, nF, n_channels, n_channels)`` or
+        ``(nwalkers, nT, nF, n_channels, n_channels)`` (gf_mode). Selects the full-covariance kernels.
+        Either noise array is required for statistic evaluation if not supplied at call time.
     spacecraft_orbits : array_like, optional
         Pre-computed spacecraft orbits array of shape ``(nT, 3,
         3)``. Required for TDI generation if not supplied at initialisation, in which case analytic orbits will be used.
@@ -65,6 +69,11 @@ class AnalyticTimeFrequencyWaveform:
         Whether to use a Tukey window for the Fresnel kernel, or a boxcar window. Default is False.
         If True, config must contain 'alpha', the Tukey taper parameter in (0, 1], which should match
         the window applied to the data. The Tukey kernel is midpoint only, so use_midpoint must be True.
+    full_invC : bool or None, optional
+        Noise model of the inner-product kernels, compiled in at construction. None (default): inferred,
+        True if invC is given, else False (diagonal psds). Set it explicitly when no noise array is passed at
+        construction but one will be passed at call time. The diagonal kernels are the original code path,
+        so a diagonal-noise search keeps its speed; the full-covariance kernels contract all channels per bin.
     """
 
     def __init__(
@@ -74,12 +83,14 @@ class AnalyticTimeFrequencyWaveform:
         backend: str | Backend = "cpu",
         tdi_type: int | None = None,
         channels: np.ndarray | None = None,
-        invC: np.ndarray | None = None,
+        psds: np.ndarray | None = None,
         spacecraft_orbits: np.ndarray | None = None,
         spacecraft_ltts: np.ndarray | None = None,
         block_vectorised_gpu: bool = False,
         gf_mode: bool = False,
         use_tukey: bool = False,
+        invC: np.ndarray | None = None,
+        full_invC: bool | None = None,
     ):
         self.backend = (
             get_backend(backend) if isinstance(backend, str) else backend
@@ -97,13 +108,29 @@ class AnalyticTimeFrequencyWaveform:
             [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
         ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
 
-        # Check if in global fit mode, check shapes of PSD and array
-        if gf_mode and channels is not None and invC is not None:
+        # Noise model: diagonal (psds) or full inverse covariance (invC). Compiled into the kernels below.
+        assert psds is None or invC is None, (
+            "Pass either psds (diagonal noise) or invC (full inverse covariance), not both."
+        )
+        if full_invC is None:
+            # If full_invC is not specified, infer it from the noise arrays passed at construction.
+            full_invC = invC is not None
+        if full_invC and psds is not None:
+            raise ValueError("full_invC=True needs a full inverse covariance: pass invC, not psds.")
+        if not full_invC and invC is not None:
+            raise ValueError("full_invC=False uses diagonal noise: pass psds, not invC.")
+        self.full_invC = bool(full_invC)
+        noise = invC if self.full_invC else psds
+        noise_name = "invC" if self.full_invC else "psds"
+
+        # Check if in global fit mode, check shapes of the data and noise arrays
+        if gf_mode and channels is not None and noise is not None:
             assert len(channels.shape) == 4, (
-                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and invC must correspond to an inverse covariance matrix of shape (nwalkers, nT, nF, n_channels, n_channels)."
+                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels)."
             )
-            assert len(invC.shape) == 5, (
-                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels) and invC must correspond to an inverse covariance matrix of shape (nwalkers, nT, nF, n_channels, n_channels)."
+            assert len(noise.shape) == (5 if self.full_invC else 4), (
+                f"In Global fit mode, {noise_name} must have a leading nwalkers axis: shape (nwalkers, nT, nF, n_channels"
+                f"{', n_channels' if self.full_invC else ''})."
             )
 
         if block_vectorised_gpu:
@@ -205,6 +232,7 @@ class AnalyticTimeFrequencyWaveform:
                 block_vectorised_gpu=block_vectorised_gpu,
                 gf_mode = gf_mode,
                 use_tukey=use_tukey,
+                full_invC=self.full_invC,
             )
         )
 
@@ -218,6 +246,7 @@ class AnalyticTimeFrequencyWaveform:
                 block_vectorised_gpu=block_vectorised_gpu,
                 gf_mode = gf_mode,
                 use_tukey=use_tukey,
+                full_invC=self.full_invC,
             )
         )
 
@@ -226,7 +255,7 @@ class AnalyticTimeFrequencyWaveform:
         (
             self.semi_coherent_statistic_kernel_cpu,
             self.semi_coherent_statistic_kernel_gpu,
-        ) = analytic_kernel_constructor_semi_coherent(*constructor_args, use_tukey=use_tukey)
+        ) = analytic_kernel_constructor_semi_coherent(*constructor_args, use_tukey=use_tukey, full_invC=self.full_invC)
 
         self._param_cache = None
 
@@ -246,9 +275,10 @@ class AnalyticTimeFrequencyWaveform:
                 assert channels.shape[1:] == expected_shape, (
                     f"In global fit mode, channels must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels})"
                 )
-            if invC is not None:
-                assert invC.shape[1:-1] == expected_shape, (
-                    f"In global fit mode, invC must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels}, {self.n_channels})"
+            if noise is not None:
+                noise_shape = expected_shape + ((self.n_channels,) if self.full_invC else ())
+                assert noise.shape[1:] == noise_shape, (
+                    f"In global fit mode, {noise_name} must have shape (nwalkers, {', '.join(map(str, noise_shape))})"
                 )
         else:
             if channels is not None:
@@ -260,17 +290,16 @@ class AnalyticTimeFrequencyWaveform:
                     f"Channels array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
                 )
 
-            if invC is not None:
-                assert invC.shape == (
-                    self.config["nT"],
-                    self.config["nF"],
-                    self.n_channels,
-                    self.n_channels,
-                ), (
-                    f"invC array must have shape {(self.config['nT'], self.config['nF'], self.n_channels, self.n_channels)}"
+            if noise is not None:
+                noise_shape = (self.config["nT"], self.config["nF"], self.n_channels) + (
+                    (self.n_channels,) if self.full_invC else ()
+                )
+                assert noise.shape == noise_shape, (
+                    f"{noise_name} array must have shape {noise_shape}"
                 )
 
         self.channels = channels
+        self.psds = psds
         self.invC = invC
 
         self.block_vectorised_gpu = block_vectorised_gpu
@@ -494,7 +523,7 @@ class AnalyticTimeFrequencyWaveform:
         self,
         parameters: dict | np.ndarray,
         channels: np.ndarray | None = None,
-        invC: np.ndarray | None = None,
+        psds: np.ndarray | None = None,
         parameters_response: np.ndarray | None = None,
         out: np.ndarray | None = None,
         compute_statistic: bool = False,
@@ -503,6 +532,7 @@ class AnalyticTimeFrequencyWaveform:
         mixed_precision: bool = False,
         use_midpoint: bool = True,
         data_indices: np.ndarray | None = None,
+        invC: np.ndarray | None = None,
         invC_prefolded: bool = False,
     ):
         """Evaluate the analytic waveform/inner-product statistic/search statistic.
@@ -513,11 +543,14 @@ class AnalyticTimeFrequencyWaveform:
             Source parameters as a named dict or a 2-D array in model order.
         channels : array_like or None
             Data array of shape ``(nT, nF, n_channels)``, or ``(nwalkers, nT, nF, n_channels)`` if gf_mode is True.
+        psds : array_like or None
+            Diagonal noise (generator built with full_invC=False): power spectral densities of shape
+            ``(nT, nF, n_channels)``, or ``(nwalkers, nT, nF, n_channels)`` if gf_mode is True.
         invC : array_like or None
-            Inverse covariance matrix of shape ``(nT, nF, n_channels, n_channels)``, or
-            ``(nwalkers, nT, nF, n_channels, n_channels)`` if gf_mode is True.
-            Required for statistic output. If not supplied
-            will use the stored invC from initialisation.
+            Full noise (generator built with full_invC=True): inverse covariance matrix of shape
+            ``(nT, nF, n_channels, n_channels)``, or ``(nwalkers, nT, nF, n_channels, n_channels)`` if gf_mode is True.
+            The noise array matching the generator's noise model is required for statistic output; if not
+            supplied, the one stored at initialisation is used.
         parameters_response : array_like, shape (n_sources, 4), optional
             Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``.
             Required when using TDI.
@@ -548,7 +581,7 @@ class AnalyticTimeFrequencyWaveform:
             nwalkers=4 walkers at ntemps=2 temperatures the n_sources=8 parameter vectors are laid
             out walker-fastest, so this is [0, 1, 2, 3, 0, 1, 2, 3].
         invC_prefolded : bool, optional
-            If True, invC already includes the 4*dF inner-product factor and is passed to the kernels
+            Full-invC mode only. If True, invC already includes the 4*dF inner-product factor and is passed to the kernels
             as-is. Lets callers that reuse one invC over many calls (e.g. a global-fit move) fold it once
             instead of paying a full-size multiply and copy per call. Default False: fold here.
         Returns
@@ -598,21 +631,31 @@ class AnalyticTimeFrequencyWaveform:
                 assert channels is not None, (
                     "Channels must be supplied to compute the statistic."
                 )
-            if invC is None:
-                invC = self.invC
-                assert invC is not None, (
-                    "invC must be supplied to compute the statistic."
+            if self.full_invC:
+                assert psds is None, (
+                    "This generator uses the full inverse covariance (full_invC=True): pass invC, not psds."
                 )
+                noise = self.invC if invC is None else invC
+                noise_name = "invC"
+            else:
+                assert invC is None, (
+                    "This generator uses diagonal noise (full_invC=False): pass psds, not invC. "
+                    "Construct it with invC=... or full_invC=True for the full inverse covariance."
+                )
+                assert not invC_prefolded, "invC_prefolded only applies to full-invC generators."
+                noise = self.psds if psds is None else psds
+                noise_name = "psds"
+            assert noise is not None, f"{noise_name} must be supplied to compute the statistic."
 
             # The kernels bound frequency indices by config nF, not by the array width, and CUDA does not bounds-check,
-            # so data/invC arrays narrower than nF are read out of bounds silently.
-            # Check channels against (nT, nF, n_channels) and invC against (nT, nF, n_channels, n_channels),
-            # each with a leading nwalkers axis in gf_mode.
+            # so data/noise arrays narrower than nF are read out of bounds silently.
+            # Check channels against (nT, nF, n_channels) and the noise against (nT, nF, n_channels) for psds or
+            # (nT, nF, n_channels, n_channels) for invC, each with a leading nwalkers axis in gf_mode.
             data_shape = (self.config["nT"], self.config["nF"], self.n_channels)
             lead = 1 if self.gf_mode else 0
             for name, arr, expected_shape in (
                 ("channels", channels, data_shape),
-                ("invC", invC, data_shape + (self.n_channels,)),
+                (noise_name, noise, data_shape + ((self.n_channels,) if self.full_invC else ())),
             ):
                 assert arr.ndim == lead + len(expected_shape) and tuple(arr.shape[lead:]) == expected_shape, (
                     f"{name} has shape {tuple(arr.shape)}, expected "
@@ -637,9 +680,9 @@ class AnalyticTimeFrequencyWaveform:
                 f"data_indices must have shape {(n_sources,)}, got {tuple(data_indices.shape)}."
             )
             nwalkers = channels.shape[0]
-            assert invC.shape[0] == nwalkers, (
-                f"In global fit mode there must be one invC per walker: channels has "
-                f"{nwalkers} walkers but invC has {invC.shape[0]}."
+            assert noise.shape[0] == nwalkers, (
+                f"In global fit mode there must be one {noise_name} per walker: channels has "
+                f"{nwalkers} walkers but {noise_name} has {noise.shape[0]}."
             )
             assert (
                 0 <= int(data_indices.min()) and int(data_indices.max()) < nwalkers
@@ -667,7 +710,11 @@ class AnalyticTimeFrequencyWaveform:
             #  
             #<d|h> = 4 * dF * d_{i}(f)^* invC_{ij}(f) h_{j}(f) = [4*dF * d_{i}(f)^* invC_{ij}(f)) h_{j](f) 
             # Skipped if the caller already folded it (invC_prefolded=True): avoids a full-size copy per call.
-            inv_covariances = invC if invC_prefolded else invC * 4 * dF
+            # Diagonal noise: pass 1/psd * 4*dF so the inner loop multiplies instead of dividing (as before).
+            if self.full_invC:
+                inv_covariances = noise if invC_prefolded else noise * 4 * dF
+            else:
+                inv_covariances = 1.0 / noise * 4 * dF
 
 
             # Branch: Compute d_h and h_h per segment.

@@ -19,6 +19,7 @@ def analytic_kernel_constructor(
     block_vectorised_gpu: bool = False,
     gf_mode: bool = False,
     use_tukey: bool = False,
+    full_invC: bool = False,
     ):
     """
     Constructor method used to generate a kernel function for computing Fresnel waveforms and derived inner-product statistics (d_h and h_h).
@@ -61,6 +62,12 @@ def analytic_kernel_constructor(
         sources are each scored against the data and PSD of their own walker, as given by data_indices. Default is False.
     use_tukey: bool, optional
         Whether to use a Tukey window for the Fresnel kernel, or a boxcar window. Default is False.
+    full_invC: bool, optional
+        Noise model of the inner-product kernels, fixed at construction (compiled in, so the unused branch costs nothing).
+        False (default): diagonal noise, invC holds 1/psd*4*dF per channel, shape (..., nT, nF, n_channels); one
+        multiply per channel per bin, as before the full-covariance support was added.
+        True: full inverse covariance between channels, shape (..., nT, nF, n_channels, n_channels); the channels
+        of h are buffered in h_vec and contracted as d^dagger invC h.
     Returns:
     -------
     kernel_cpu: Callable
@@ -174,9 +181,9 @@ def analytic_kernel_constructor(
             NOTE: Precomputed, not computed in the kernel at runtime.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h) for each time-segment for the given source.
-        invC: array (nT, nF, n_channels, n_channels) or (nwalkers, nT, nF, n_channels, n_channels) if global_fit_mode is True
-            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
-            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array, inverse noise with the 4*dF inner-product factor folded in outside the kernel (with a leading nwalkers axis if global_fit_mode is True).
+            full_invC False: (nT, nF, n_channels), 1/psd * 4*dF per channel (diagonal noise).
+            full_invC True:  (nT, nF, n_channels, n_channels), inverse covariance between channels * 4*dF.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         use_midpoint : bool
@@ -323,15 +330,29 @@ def analytic_kernel_constructor(
                             h = h_TT[i]
 
                         if compute_statistic:
-                            h_vec[i] = h
+                            if full_invC:
+                                # If full invC is used, buffer the waveform in h_vec for the full invC inner products.
+                                h_vec[i] = h
+                            else:
+                                # Diagonal noise: invC is 1/psd*4*dF per channel, accumulate channel by channel.
+                                if global_fit_mode:
+                                    data_index = data_indices[src_num]
+                                    d = channels[data_index, t_idx, f_idx, i]
+                                    inv_psd = invC[data_index, t_idx, f_idx, i]
+                                else:
+                                    d = channels[t_idx, f_idx, i]
+                                    inv_psd = invC[t_idx, f_idx, i]
+                                d_h += complex_inner_product(d, h, inv_psd)
+                                h_h += complex_inner_product(h, h, inv_psd)
                         else:
+                            # Waveform path
                             channels[src_num, t_idx, f_idx, i] = h
 
-                    # If compute_statistic is True, compute d_h = d^dagger invC h and h_h = h^dagger invC h over all channels for this (t, f) bin.
+                    # Full invC: compute d_h = d^dagger invC h and h_h = h^dagger invC h over all channels for this (t, f) bin.
                     # global_fit_mode is a special mode where each walker in a global fit carries its own data (channels array) and inverse covariance (invC array),
                     # of shapes (nwalkers, nT, nF, n_channels) and (nwalkers, nT, nF, n_channels, n_channels). The batch of sources is larger than nwalkers (n_sources = nwalkers x ntemps), so
                     # data_indices maps this source back to its walker, and the same index is used for both the data and the inverse covariance.
-                    if compute_statistic:
+                    if compute_statistic and full_invC:
                         if global_fit_mode:
                             data_index = data_indices[src_num]
                             d_vec = channels[data_index, t_idx, f_idx, :]
@@ -391,9 +412,9 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h for each time-segment for the given source.
-        invC: array (nT, nF, n_channels, n_channels) or (nwalkers, nT, nF, n_channels, n_channels) if global_fit_mode is True
-            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
-            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array, inverse noise with the 4*dF inner-product factor folded in outside the kernel (with a leading nwalkers axis if global_fit_mode is True).
+            full_invC False: (nT, nF, n_channels), 1/psd * 4*dF per channel (diagonal noise).
+            full_invC True:  (nT, nF, n_channels, n_channels), inverse covariance between channels * 4*dF.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         use_midpoint : bool
@@ -487,9 +508,9 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Local array to store the computed statistics (d_h and h_h for each time-segment for the given source.
-        invC: array (nT, nF, n_channels, n_channels) or (nwalkers, nT, nF, n_channels, n_channels) if global_fit_mode is True
-            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
-            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array, inverse noise with the 4*dF inner-product factor folded in outside the kernel (with a leading nwalkers axis if global_fit_mode is True).
+            full_invC False: (nT, nF, n_channels), 1/psd * 4*dF per channel (diagonal noise).
+            full_invC True:  (nT, nF, n_channels, n_channels), inverse covariance between channels * 4*dF.
         mixed_precision: bool
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
         use_midpoint : bool
@@ -587,9 +608,9 @@ def analytic_kernel_constructor(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources, nT, 2) (array to be filled in within the kernel if compute_statistic is True)
             Array to store the computed statistics: [..., 0] holds d_h and [..., 1] holds h_h for each time-segment of the given source.
-        invC: array (nT, nF, n_channels, n_channels) or (nwalkers, nT, nF, n_channels, n_channels) if global_fit_mode is True
-            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
-            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array, inverse noise with the 4*dF inner-product factor folded in outside the kernel (with a leading nwalkers axis if global_fit_mode is True).
+            full_invC False: (nT, nF, n_channels), 1/psd * 4*dF per channel (diagonal noise).
+            full_invC True:  (nT, nF, n_channels, n_channels), inverse covariance between channels * 4*dF.
         mixed_precision: bool 
             NOTE this is not currently implemented for the block-vectorised kernel.
             Whether to use mixed precision (float32) for the computations within the kernel, to save memory and speed up computations.
@@ -733,12 +754,25 @@ def analytic_kernel_constructor(
 
                         # Statistic mode: buffer all channels first (full invC couples them). Waveform mode: write out directly.
                         if compute_statistic:
-                            h_vec[i] = h
+                            if full_invC:
+                                # If full invC is used, buffer the waveform in h_vec for the full invC inner products.
+                                h_vec[i] = h
+                            else:
+                                # Diagonal noise: invC is 1/psd*4*dF per channel, accumulate channel by channel.
+                                if global_fit_mode:
+                                    data_index = data_indices[src_num]
+                                    d = channels[data_index, t_idx, freq_ind, i]
+                                    inv_psd = invC[data_index, t_idx, freq_ind, i]
+                                else:
+                                    d = channels[t_idx, freq_ind, i]
+                                    inv_psd = invC[t_idx, freq_ind, i]
+                                d_h_here += complex_inner_product(d, h, inv_psd)
+                                h_h_here += complex_inner_product(h, h, inv_psd)
                         else:
                             channels[src_num, t_idx, freq_ind, i] = h
 
-                    # If compute_statistic is True, this thread's (t, f) contribution: d^dagger invC h and h^dagger invC h over all channels.
-                    if compute_statistic:
+                    # Full invC: this thread's (t, f) contribution, d^dagger invC h and h^dagger invC h over all channels.
+                    if compute_statistic and full_invC:
                         # global_fit_mode is a special mode where each walker in a global fit carries its own data (channels array) and inverse covariance (invC array),
                         # of shapes (nwalkers, nT, nF, n_channels) and (nwalkers, nT, nF, n_channels, n_channels). data_indices maps this source (one of n_sources = nwalkers x ntemps) back to its walker.
                         if global_fit_mode:

@@ -5,7 +5,7 @@ import numpy as np
 from numba import cuda, jit, njit
 
 from ..response.transfer import fill_k, fill_P_lm
-from ..utils import complex_inner_product_full_invC
+from ..utils import complex_inner_product, complex_inner_product_full_invC
 from .common import _fresnel_kernel, _fresnel_tukey_midpoint
 
 
@@ -131,6 +131,7 @@ def analytic_kernel_constructor_semi_coherent(
     _get_phi_f_fdot: Callable,
     _get_channels: Callable,
     use_tukey: bool = False,
+    full_invC: bool = False,
 ):
     '''
     Constructor method used to generate a kernel function for computing the semi-coherent detection statistic directly per source.
@@ -169,6 +170,10 @@ def analytic_kernel_constructor_semi_coherent(
     use_tukey: bool, optional
         Whether to use a Tukey window for the Fresnel kernel, or a boxcar window. Default is False.
         NOTE: The Tukey kernel is midpoint only, so use_midpoint must be True when calling the kernels.
+    full_invC: bool, optional
+        Noise model, fixed at construction (compiled in, so the unused branch costs nothing).
+        False (default): diagonal noise, invC is 1/psd*4*dF of shape (nT, nF, n_channels), one multiply per
+        channel per bin (the original, fastest search path). True: full inverse covariance (nT, nF, n_channels, n_channels).
 
     kernel_cpu: Callable
         A CPU kernel function that can be called to compute the per-source semi-coherent statistic.
@@ -272,9 +277,9 @@ def analytic_kernel_constructor_semi_coherent(
             NOTE: Precomputed, not computed in the kernel at runtime.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for the given source.
-        invC: array (nT, nF, n_channels, n_channels)
-            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
-            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array, inverse noise with the 4*dF inner-product factor folded in outside the kernel.
+            full_invC False: (nT, nF, n_channels), 1/psd * 4*dF per channel (diagonal noise).
+            full_invC True:  (nT, nF, n_channels, n_channels), inverse covariance between channels * 4*dF.
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
@@ -422,16 +427,25 @@ def analytic_kernel_constructor_semi_coherent(
                             )
 
                         # Generate AET channels via multiplicative, frequency-domain transfer function.
-                        # Buffer all channels first, since the full invC couples them.
-                        for i in range(channels.shape[-1]):
-                            h_vec[i] = h_f_pos * transfer_functions[i]
+                        if full_invC:
+                            # Buffer all channels first, since the full invC couples them.
+                            for i in range(channels.shape[-1]):
+                                h_vec[i] = h_f_pos * transfer_functions[i]
 
-                        # Accumulate this (t, f) bin's d^dagger invC h and h^dagger invC h over all channels.
-                        d_vec = channels[t_idx, f_idx, :]
-                        invC_tf = invC[t_idx, f_idx, :, :]
-                        d_h += complex_inner_product_full_invC(d_vec, h_vec, invC_tf)
-                        # Real for Hermitian invC; take .real to drop round-off imaginary parts.
-                        h_h += complex_inner_product_full_invC(h_vec, h_vec, invC_tf).real
+                            # Accumulate this (t, f) bin's d^dagger invC h and h^dagger invC h over all channels.
+                            d_vec = channels[t_idx, f_idx, :]
+                            invC_tf = invC[t_idx, f_idx, :, :]
+                            d_h += complex_inner_product_full_invC(d_vec, h_vec, invC_tf)
+                            # Real for Hermitian invC; take .real to drop round-off imaginary parts.
+                            h_h += complex_inner_product_full_invC(h_vec, h_vec, invC_tf).real
+                        else:
+                            # Diagonal noise: invC is 1/psd*4*dF per channel, accumulate channel by channel.
+                            for i in range(channels.shape[-1]):
+                                h = h_f_pos * transfer_functions[i]
+                                d = channels[t_idx, f_idx, i]
+                                inv_psd = invC[t_idx, f_idx, i]
+                                d_h += complex_inner_product(d, h, inv_psd)
+                                h_h += complex_inner_product(h, h, inv_psd)
 
                 # Add the per-tranche statistics to the per-segment statistic.
                 d_h_seg += d_h
@@ -483,9 +497,9 @@ def analytic_kernel_constructor_semi_coherent(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for each source.
-        invC: array (nT, nF, n_channels, n_channels)
-            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
-            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array, inverse noise with the 4*dF inner-product factor folded in outside the kernel.
+            full_invC False: (nT, nF, n_channels), 1/psd * 4*dF per channel (diagonal noise).
+            full_invC True:  (nT, nF, n_channels, n_channels), inverse covariance between channels * 4*dF.
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
@@ -576,9 +590,9 @@ def analytic_kernel_constructor_semi_coherent(
             Used to fill in the Ls array within the kernel for TDI response computation.
         statistic: array (n_sources,) (filled in within the kernel)
             Array to be filled in with the semi-coherent statistic for each source.
-        invC: array (nT, nF, n_channels, n_channels)
-            Inverse noise covariance matrix between the channels in each (t, f) bin, with the 4*dF inner-product
-            factor prefolded outside the kernel (invC * 4 * dF). Used to compute the inner products for the statistics if compute_statistic is True.
+        invC: array, inverse noise with the 4*dF inner-product factor folded in outside the kernel.
+            full_invC False: (nT, nF, n_channels), 1/psd * 4*dF per channel (diagonal noise).
+            full_invC True:  (nT, nF, n_channels, n_channels), inverse covariance between channels * 4*dF.
         Nseg: int
             The number of sub-segments into which the in-band time-segments are divided for the semi-coherent statistic.
         mixed_precision: bool
