@@ -10,6 +10,7 @@ If you find this package useful, please consider citing both the `software <http
    :caption: Contents:
 
    installation
+   v2_backend
    ../examples/quickstart.ipynb
 
    API reference </autoapi/pygwtf/index>

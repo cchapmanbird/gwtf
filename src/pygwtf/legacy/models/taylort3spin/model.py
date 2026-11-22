@@ -2,7 +2,7 @@ from typing import Callable
 
 import numpy as np
 
-from ...constants import MTsun, clight, pc
+from ....constants import MTsun, clight, pc
 from ..base import AnalyticModel
 from .common import (
     _get_amplitude,

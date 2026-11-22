@@ -2,7 +2,7 @@ from math import log, pi, sqrt
 
 from numba import cuda, jit, njit
 
-from ...constants import gamma_e
+from ....constants import gamma_e
 
 
 @njit

@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68", "wheel", "setuptools-scm[toml]>=6.2"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4", "setuptools-scm>=8"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "pygwtf"
@@ -13,7 +13,7 @@ dependencies = [
     "scipy",
     "matplotlib",
     "numpy",
-    "numba",
+    "array-api-compat",
     "lisaconstants",
     "astropy",
     "h5py",
@@ -23,10 +23,12 @@ dynamic = [
 ]
 
 [project.optional-dependencies]
+legacy = ["numba"]  # v1 reference implementation (pygwtf.legacy)
 dev = [
     "pre-commit",
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "numba",
 ]
 
 
@@ -34,14 +36,25 @@ dev = [
 Homepage = "https://github.com/cchapmanbird/gwtf"
 Repository = "https://github.com/cchapmanbird/gwtf"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+wheel.packages = ["src/pygwtf"]
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+metadata.version.provider = "scikit_build_core.metadata.setuptools_scm"
+sdist.include = ["src/cpp"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-include = ["gwtf*"]
+[tool.scikit-build.cmake.define]
+GWTF_GPU = {env = "GWTF_GPU", default = "AUTO"}
 
 [tool.setuptools_scm]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "gpu: requires the GPU backend and a device",
+    "legacy: compares against the numba v1 implementation (slow, needs numba)",
+]
 
 [tool.ruff]
 line-length = 79

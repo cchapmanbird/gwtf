@@ -1,79 +1,70 @@
-from typing import Type
+"""
+Analytic time-frequency waveform generator (v2 compiled backend).
+"""
+
+from __future__ import annotations
+
+import warnings
+from typing import Any, Type
 
 import numpy as np
 
-from .backend import Backend, get_backend
-from .fresnel.kernel import analytic_kernel_constructor
-from .fresnel.search_kernels import analytic_kernel_constructor_semi_coherent
+from ._base import (
+    COMPLEX_DTYPE,
+    NOISE_DIAGONAL,
+    NOISE_FULL,
+    PRECISION_CODE,
+    WINDOW_BOXCAR,
+    WINDOW_TUKEY,
+    TimeFrequencyBase,
+)
+from ._interop import ArrayFormat, to_backend
+from .backend import Backend
 from .models.base import AnalyticModel
-from .response.orbits import get_analytic_ltts, get_analytic_orbits
-from .response.transfer import get_AET_TFs
 
-# Number of threads per block for GPU kernels, common choice.
-THREADS_PER_BLOCK = 128
+__all__ = ["AnalyticTimeFrequencyWaveform"]
 
 
-class AnalyticTimeFrequencyWaveform:
+class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
     """
     Analytic time-frequency waveform generator.
 
-    Constructs generative kernels of the chosen prescription (only Fresnel currently supported)
-    for both waveform generation and inner-product evaluation in the time-frequency domain,
-    driven by a physical model. CPU or GPU operation is specified by the chosen backend.
+    Generates Fresnel time-frequency waveforms, or per-segment inner products
+    against data, for an analytic model compiled into the backend.
 
     Parameters
     ----------
-    model_class:
-        The model class to instantiate (e.g. ``TaylorT2Ecc``).  Initialised
-        inside this constructor with the chosen backend.
+    model_class : type[AnalyticModel]
+        Model class (e.g. ``TaylorT2Ecc``); instantiated with the backend.
     config : dict
-        Kernel configuration, with kwargs specific to the prescription used.
-    backend : str or Backend, optional
-        Compute backend — ``'cpu'`` (default) or ``'gpu'``.
-    tdi_type : {None, 2}, optional
-        TDI generation order.  ``None`` produces TT polarisations.
-        ``2`` produces second-generation TDI.
-    channels : array_like, optional
-        Pre-computed data array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
-        Required for statistic evaluation if not supplied at call time.
-    psds : array_like, optional
-        Diagonal noise: pre-computed PSD array of shape ``(nT, nF, n_channels)`` or ``(nwalkers, nT, nF, n_channels)`` (gf_mode).
-        Selects the diagonal-noise kernels (the default, fastest path). Pass either psds or invC, not both.
-    invC : array_like, optional
-        Full noise: pre-computed inverse covariance matrix array of shape ``(nT, nF, n_channels, n_channels)`` or
-        ``(nwalkers, nT, nF, n_channels, n_channels)`` (gf_mode). Selects the full-covariance kernels.
-        Either noise array is required for statistic evaluation if not supplied at call time.
-    spacecraft_orbits : array_like, optional
-        Pre-computed spacecraft orbits array of shape ``(nT, 3,
-        3)``. Required for TDI generation if not supplied at initialisation, in which case analytic orbits will be used.
-    spacecraft_ltts: array_like, optional
-        Pre-computed spacecraft light travel times array of shape ``(nT, 3)``.
-        Required for TDI generation if not supplied at initialisation, in which case will be calculated analytically from positions
-        (Need in metre units not seconds)
-    block_vectorised_gpu : bool, optional
-        Whether to use a block-vectorised GPU kernel, where each block processes one source in one time segment,
-        and each thread processes one frequency bin for that configuration. This can improve performance for small
-        numbers of sources, but may be slower for large numbers of sources. Default is False.
-    gf_mode : bool, optional
-        Whether to use global fit mode, where the data and PSD are carried per walker rather than
-        being shared across the batch. Default is False. In this mode:
-        -  the channels and psds arrays must both have shape (nwalkers, nT, nF, n_channels).
-        -  the batch of source parameters may be larger than nwalkers: a parallel-tempered sampler
-           hands over n_sources = nwalkers x ntemps parameter vectors per call.
-        -  the call expects a ``data_indices`` array of shape (n_sources,) mapping each source to its
-           walker, i.e. to the index along the leading axis of *both* channels and psds. For 4 walkers
-           at 2 temperatures this is [0, 1, 2, 3, 0, 1, 2, 3].
-        NOTE: Not supported with the semi-coherent statistic kernels, only intended use is to use the
-        usual normal kernels to compute d_h and h_h.
-    use_tukey : bool, optional
-        Whether to use a Tukey window for the Fresnel kernel, or a boxcar window. Default is False.
-        If True, config must contain 'alpha', the Tukey taper parameter in (0, 1], which should match
-        the window applied to the data. The Tukey kernel is midpoint only, so use_midpoint must be True.
-    full_invC : bool or None, optional
-        Noise model of the inner-product kernels, compiled in at construction. None (default): inferred,
-        True if invC is given, else False (diagonal psds). Set it explicitly when no noise array is passed at
-        construction but one will be passed at call time. The diagonal kernels are the original code path,
-        so a diagonal-noise search keeps its speed; the full-covariance kernels contract all channels per bin.
+        Grid configuration: ``nT``, ``nF``, ``dT``, ``dF``, ``kernel_width``,
+        optionally ``fmin`` (central frequency of bin 0, default ``dF``) and
+        ``alpha`` (Tukey taper fraction, required if ``use_tukey``).
+    backend : {'cpu', 'gpu'} or Backend
+        ``'cpu'`` runs the serial host build, ``'gpu'`` the HIP/CUDA build.
+    tdi_type : {None, 2}
+        ``None`` produces TT polarisations (h+, hx); ``2`` second-generation
+        TDI (A, E, T).
+    channels, psds, invC :
+        Data ``(nT, nF, n_channels)`` and either diagonal PSDs (same shape) or
+        a full inverse covariance ``(nT, nF, n_channels, n_channels)``, used
+        when not supplied at call time.
+    spacecraft_orbits, spacecraft_ltts :
+        ``(nT, 3, 3)`` positions [m] and ``(nT, 3)`` arm lengths [m] for links
+        (12, 23, 31). Analytic orbits are used if omitted (TDI only).
+    use_tukey : bool
+        Tukey-windowed Fresnel kernel (midpoint only) instead of box-car.
+    full_invC : bool, optional
+        Noise model; inferred from whether ``invC`` is given.
+    precision : {'single', 'double'}
+        Default precision. ``'single'`` (default, fast path) evaluates the
+        model in double, then builds the time-frequency kernel, response and
+        inner products in float32; ``'double'`` keeps float64 throughout.
+        Overridable per call with ``mixed_precision``.
+    block_vectorised_gpu : bool
+        Ignored (v1 launch option; v2 always parallelises over source x segment).
+    gf_mode : bool
+        Global-fit (per-walker data) mode is not yet available in v2.
     """
 
     def __init__(
@@ -82,725 +73,293 @@ class AnalyticTimeFrequencyWaveform:
         config: dict,
         backend: str | Backend = "cpu",
         tdi_type: int | None = None,
-        channels: np.ndarray | None = None,
-        psds: np.ndarray | None = None,
-        spacecraft_orbits: np.ndarray | None = None,
-        spacecraft_ltts: np.ndarray | None = None,
+        channels: Any = None,
+        psds: Any = None,
+        spacecraft_orbits: Any = None,
+        spacecraft_ltts: Any = None,
         block_vectorised_gpu: bool = False,
         gf_mode: bool = False,
         use_tukey: bool = False,
-        invC: np.ndarray | None = None,
+        invC: Any = None,
         full_invC: bool | None = None,
+        precision: str = "single",
     ):
-        self.backend = (
-            get_backend(backend) if isinstance(backend, str) else backend
+        if gf_mode:
+            raise NotImplementedError(
+                "Global-fit mode (per-walker data) is not implemented in the v2 backend yet; "
+                "use pygwtf.legacy.generator for now."
+            )
+        if block_vectorised_gpu:
+            warnings.warn(
+                "block_vectorised_gpu has no effect in the v2 backend (kernels always "
+                "parallelise over source x time segment).",
+                stacklevel=2,
+            )
+        super().__init__(
+            config,
+            backend=backend,
+            tdi_type=tdi_type,
+            channels=channels,
+            psds=psds,
+            invC=invC,
+            full_invC=full_invC,
+            spacecraft_orbits=spacecraft_orbits,
+            spacecraft_ltts=spacecraft_ltts,
+            use_tukey=use_tukey,
+            precision=precision,
         )
         self.model = model_class(backend=self.backend)
-        self.config = config
-        self.config["nT"] = int(self.config["nT"])
-        self.config["nF"] = int(self.config["nF"])
-        self.config["dT"] = float(self.config["dT"])
-        self.config["dF"] = float(self.config["dF"])
+        self.gf_mode = False
+        self.block_vectorised_gpu = False
 
-        self.config["fmin"] = float(self.config.get("fmin", self.config["dF"]))  # Default to dF if not provided, always dropping DC
-
-        assert np.all(
-            [key in self.config.keys() for key in ["nT", "nF", "dT", "dF"]]
-        ), "Config must contain 'nT', 'nF', 'dT', and 'dF' keys."
-
-        # Noise model: diagonal (psds) or full inverse covariance (invC). Compiled into the kernels below.
-        assert psds is None or invC is None, (
-            "Pass either psds (diagonal noise) or invC (full inverse covariance), not both."
-        )
-        if full_invC is None:
-            # If full_invC is not specified, infer it from the noise arrays passed at construction.
-            full_invC = invC is not None
-        if full_invC and psds is not None:
-            raise ValueError("full_invC=True needs a full inverse covariance: pass invC, not psds.")
-        if not full_invC and invC is not None:
-            raise ValueError("full_invC=False uses diagonal noise: pass psds, not invC.")
-        self.full_invC = bool(full_invC)
-        noise = invC if self.full_invC else psds
-        noise_name = "invC" if self.full_invC else "psds"
-
-        # Check if in global fit mode, check shapes of the data and noise arrays
-        if gf_mode and channels is not None and noise is not None:
-            assert len(channels.shape) == 4, (
-                "In Global fit mode, channels must correspond to a data array of shape (nwalkers, nT, nF, n_channels)."
-            )
-            assert len(noise.shape) == (5 if self.full_invC else 4), (
-                f"In Global fit mode, {noise_name} must have a leading nwalkers axis: shape (nwalkers, nT, nF, n_channels"
-                f"{', n_channels' if self.full_invC else ''})."
-            )
-
-        if block_vectorised_gpu:
-            assert backend == "gpu", "Block vectorised GPU kernels can only be used with GPU backend."
-
-        if use_tukey:
-            assert "alpha" in self.config, "Config must contain 'alpha' when use_tukey is True."
-            self.config["alpha"] = float(self.config["alpha"])
-            assert 0 < self.config["alpha"] <= 1, (
-                f"Tukey alpha must be in (0, 1], but got alpha={self.config['alpha']}."
-            )
-        self.use_tukey = use_tukey
-
-        self.config["dt"] = 1 / (self.config["nF"] * self.config["dF"])
-
-        # Setting up time and frequency grid used by the kernels.
-        self.t_tranche = (
-            self.backend.xp.arange(self.config["nT"]) * self.config["dT"]
-        )
-
-        self.f_tranche = (
-            self.backend.xp.arange(self.config["nF"]) * self.config["dF"]
-        )
-
-        self.tdi_type = tdi_type
-
-        assert self.tdi_type == 2 or self.tdi_type is None, (
-            "Only TDI-2 generation is currently supported. Set tdi_type to 2 or None."
-        )
-
-        # If TDI type is not specified, do not compute TDI channels, instead go for the h_plus/h_cross polarisations.
-        if self.tdi_type is None:
-            channel_fn = self.model.get_TT_polarisations_function
-            self.n_channels = 2
-
-            # Fill in dummy orbits for non-TDI generation, as the kernel expects an array of this shape regardless.
-            spacecraft_orbits = self.backend.xp.zeros(
-                (self.config["nT"], 3, 3), dtype=np.float64
-            )
-
-        # TDI case
-        else:
-            # Only TDI-2 now.
-            channel_fn = get_AET_TFs
-            self.n_channels = 3
-            if spacecraft_orbits is None:
-                print(
-                    "Spacecraft orbits not supplied. Falling back to analytic orbits"
-                )
-                spacecraft_orbits = self.backend.xp.asarray(
-                    get_analytic_orbits(self.backend.asnumpy(self.t_tranche))
-                )
-            else:
-                spacecraft_orbits = self.backend.xp.asarray(spacecraft_orbits)
-                assert spacecraft_orbits.shape == (self.config["nT"], 3, 3), (
-                    f"Spacecraft orbits array must have shape {(self.config['nT'], 3, 3)}"
-                )
-
-        self.spacecraft_orbits = spacecraft_orbits
-
-        if spacecraft_ltts is None:  # in *metres*
-            print(
-                "Spacecraft light travel times not supplied. Falling back to analytic calculation"
-            )
-            spacecraft_ltts = self.backend.xp.asarray(
-                get_analytic_ltts(
-                    self.backend.asnumpy(self.spacecraft_orbits)
-                )  # computed in metres
-            )
-        else:
-            spacecraft_ltts = self.backend.xp.asarray(
-                spacecraft_ltts
-            )  # in metres
-            assert spacecraft_ltts.shape == (self.config["nT"], 3), (
-                f"Spacecraft light travel times array must have shape {(self.config['nT'], 3)}"
-            )
-
-        self.spacecraft_ltts = spacecraft_ltts
-
-        kernel_config = {
-            **self.config,
-            "nparams": self.model.num_parameters
-            + self.model.num_derived_parameters,
-        }
-
-        constructor_args = (
-            kernel_config,
-            self.model.amplitude_function,
-            self.model.phi_f_fdot_function,
-            channel_fn,
-        )
-
-        # Construct waveform kernels, these are used to return the h_plus/h_cross or TDI channels for given parameters.
-        self.waveform_kernel_cpu, self.waveform_kernel_gpu = (
-            analytic_kernel_constructor(
-                *constructor_args,
-                compute_statistic=False,
-                tdi_type=tdi_type,
-                block_vectorised_gpu=block_vectorised_gpu,
-                gf_mode = gf_mode,
-                use_tukey=use_tukey,
-                full_invC=self.full_invC,
-            )
-        )
-
-        # Construct inner-product kernels, these are the kernels used for the statistic evaluation, and to build search statistics/likelhoods.
-        # Note that the statistic kernel does not return the waveform and vice-versa.
-        self.statistic_kernel_cpu, self.statistic_kernel_gpu = (
-            analytic_kernel_constructor(
-                *constructor_args,
-                compute_statistic=True,
-                tdi_type=tdi_type,
-                block_vectorised_gpu=block_vectorised_gpu,
-                gf_mode = gf_mode,
-                use_tukey=use_tukey,
-                full_invC=self.full_invC,
-            )
-        )
-
-        # Construct direct semi-coherent statistic kernels that write one value per source.
-        # 'Special' kernels used to do do the sobbh search.
-        (
-            self.semi_coherent_statistic_kernel_cpu,
-            self.semi_coherent_statistic_kernel_gpu,
-        ) = analytic_kernel_constructor_semi_coherent(*constructor_args, use_tukey=use_tukey, full_invC=self.full_invC)
-
-        self._param_cache = None
-
-        self.gf_mode = gf_mode
-
-        # Corresponds to the 'data' array against which inner-products are computed, and the PSD
-        # array used for the inner-product/statistic computation. Both can be left as None if only
-        # waveform generation is desired.
-        #
-        # In global-fit mode each walker carries its own data and PSD, so the trailing
-        # (nT, nF, n_channels) block is validated but preceded by a leading nwalkers axis. The
-        # source -> walker mapping is supplied per call via data_indices, so nwalkers is only
-        # pinned down (and checked against that map) at call time.
-        if gf_mode:
-            expected_shape = (self.config["nT"], self.config["nF"], self.n_channels)
-            if channels is not None:
-                assert channels.shape[1:] == expected_shape, (
-                    f"In global fit mode, channels must have shape (nwalkers, {self.config['nT']}, {self.config['nF']}, {self.n_channels})"
-                )
-            if noise is not None:
-                noise_shape = expected_shape + ((self.n_channels,) if self.full_invC else ())
-                assert noise.shape[1:] == noise_shape, (
-                    f"In global fit mode, {noise_name} must have shape (nwalkers, {', '.join(map(str, noise_shape))})"
-                )
-        else:
-            if channels is not None:
-                assert channels.shape == (
-                    self.config["nT"],
-                    self.config["nF"],
-                    self.n_channels,
-                ), (
-                    f"Channels array must have shape {(self.config['nT'], self.config['nF'], self.n_channels)}"
-                )
-
-            if noise is not None:
-                noise_shape = (self.config["nT"], self.config["nF"], self.n_channels) + (
-                    (self.n_channels,) if self.full_invC else ()
-                )
-                assert noise.shape == noise_shape, (
-                    f"{noise_name} array must have shape {noise_shape}"
-                )
-
-        self.channels = channels
-        self.psds = psds
-        self.invC = invC
-
-        self.block_vectorised_gpu = block_vectorised_gpu
-
-    def waveform_kernel(self, n_sources, *args):
-        """Call waveform kernel for the selected backend.
-
-        NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays.
-
-        Parameters
-        ----------
-        n_sources : int
-            Number of sources to process, used to determine GPU grid size if applicable.
-        *args : tuple
-            Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing.
-            See the kernel construction functions for details on the expected arguments.
-        """
-        if self.backend.uses_gpu:
-            if self.block_vectorised_gpu:
-                # 2-d grids of blocks and threads
-                # - Each block processes one source in one time segment
-                # - Each thread processes one frequency bin for that configuration
-                bpg = (n_sources, self.config["nT"])
-                tpb = (32, 1)
-            else:
-                # One thread per source
-                bpg = (
-                    n_sources + (THREADS_PER_BLOCK - 1)
-                ) // THREADS_PER_BLOCK
-                tpb = THREADS_PER_BLOCK
-            self.waveform_kernel_gpu[bpg, tpb](*args)
-        else:
-            self.waveform_kernel_cpu(*args)
-
-    def statistic_kernel(self, n_sources, *args):
-        """Active statistic kernel for the selected backend.
-           Only returns the per-segment d_h and h_h values.
-
-        NOTE: There are no explicit returns from this function as the kernels are filling in the pre-allocated output arrays.
-
-        Parameters
-        ----------
-        n_sources : int
-            Number of sources to process, used to determine GPU grid size if applicable.
-        *args : tuple
-            Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing.
-            See the kernel construction functions for details on the expected arguments.
-        """
-        if self.backend.uses_gpu:
-            if self.block_vectorised_gpu:
-                # 2-d grids of blocks and threads
-                # - Each block processes one source in one time segment
-                # - Each thread processes one frequency bin for that configuration
-                bpg = (n_sources, self.config["nT"])
-                tpb = (32, 1)
-            else:
-                # One thread per source
-                bpg = (
-                    n_sources + (THREADS_PER_BLOCK - 1)
-                ) // THREADS_PER_BLOCK
-                tpb = THREADS_PER_BLOCK
-            self.statistic_kernel_gpu[bpg, tpb](*args)
-        else:
-            self.statistic_kernel_cpu(*args)
-
-    def semi_coherent_statistic_kernel(self, n_sources, *args):
-        """Active direct semi-coherent statistic kernel for the selected backend.
-           Returns the final semi-coherent statistic value per source, after summing over segments internally in the kernel.
-           NOTE: Only really used for the SoBBH search
-
-        Parameters
-        ----------
-        n_sources : int
-            Number of sources to process, used to determine GPU grid size if applicable.
-        *args : tuple
-            Arguments to pass to the kernel, excluding n_sources which is passed separately for GPU grid sizing
-            See the kernel construction functions for details on the expected arguments.
-        """
-        if self.backend.uses_gpu:
-            bpg = (n_sources + (THREADS_PER_BLOCK - 1)) // THREADS_PER_BLOCK
-            self.semi_coherent_statistic_kernel_gpu[bpg, THREADS_PER_BLOCK](
-                *args
-            )
-        else:
-            self.semi_coherent_statistic_kernel_cpu(*args)
-
-    def _load_parameters(
-        self,
-        parameters: dict | np.ndarray,
-    ) -> tuple[np.ndarray, bool]:
-        """Copy parameters into the internal cache, realloc if source count changes.
-        Internal cache is helpful as filling in an array is cheaper than reallocating array, specially on GPU.
-
-        Parameters
-        ----------
-        parameters : dict[str, array_like] or array_like, shape (n_sources, n_params)
-            Physical parameters as a named dictionary or a pre-ordered 2-D array.
-
-        Returns
-        ----------
-        ndarray, shape (n_sources, n_params + n_derived)
-            The parameter cache with derived parameters filled in.
-        """
-        xp = self.backend.xp
-        n_phys = self.model.num_parameters
-        n_total = n_phys + self.model.num_derived_parameters
-
-        single_source = False
+    # ------------------------------------------------------------------ inputs
+    def _raw_parameters(self, parameters) -> tuple[Any, bool]:
+        """User parameters -> (n_sources, n_params) float64 backend array."""
+        names = self.model.parameters
         if isinstance(parameters, dict):
-            try:
-                if len(parameters[self.model.parameters[0]]) == 0:
-                    single_source = True
-            except TypeError:
-                single_source = True
-
-            try:
-                dtype = parameters[self.model.parameters[0]].dtype
-            except (KeyError, AttributeError):
-                dtype = np.float64
-
-            raw = xp.stack(
-                [
-                    xp.atleast_1d(xp.asarray(parameters[name], dtype=dtype))
-                    for name in self.model.parameters
-                ],
-                axis=1,
-            )
+            missing = [n for n in names if n not in parameters]
+            if missing:
+                raise KeyError(
+                    f"Missing parameters for {type(self.model).__name__}: {missing}"
+                )
+            first = parameters[names[0]]
+            single = np.ndim(first) == 0
+            cols = [
+                to_backend(parameters[n], self.backend, np.float64).reshape(-1)
+                for n in names
+            ]
+            raw = self.backend.xp.stack(cols, axis=1)
         else:
-            if parameters.ndim == 1:
-                single_source = True
-            dtype = parameters.dtype
-            raw = xp.atleast_2d(xp.asarray(parameters, dtype=dtype))
+            raw = to_backend(parameters, self.backend, np.float64)
+            single = raw.ndim == 1
+            if single:
+                raw = raw[None]
+        if raw.ndim != 2 or raw.shape[1] != len(names):
+            raise ValueError(
+                f"parameters must have shape (n_sources, {len(names)}) in order {names}"
+            )
+        return self.backend.xp.ascontiguousarray(raw), single
 
-        n_sources = raw.shape[0]
-
-        # Re-allocating parameter cache if n_sources changes, or if the dtyle changes (e.g. from array to dict)
-        if (
-            self._param_cache is None
-            or self._param_cache.shape[0] != n_sources
-            or self._param_cache.dtype != dtype
-        ):
-            self._param_cache = xp.zeros((n_sources, n_total), dtype=dtype)
-
-        # Assign the physical parameters, then compute the derived parameters in-place in the cache.
-        self._param_cache[:, :n_phys] = raw
-
-        # Method of the model
-        self.model.compute_derived_parameters(self._param_cache)
-
-        return self._param_cache, single_source
-
-    def _compute_segment_indices(self, parameters_cache, use_midpoint = True):
-        """
-        Derive per-source time-segment indices from the model's time bounds.
-
-        Used for computing the time-index range the source is in the LISA band for each source in nsources,
-
-        Parameters
-        ----------
-        parameters_cache : ndarray, shape (n_sources, n_params + n_derived)
-            The parameters with derived parameters filled in.
-        use_midpoint : bool, optional
-            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning.
-            (Default: True) 
-            
-        """
+    def _prepare(self, raw, grid):
+        """Run the model's unit conversion, derived parameters and time bounds."""
         xp = self.backend.xp
-        nT = self.config["nT"]
-        dT = self.config["dT"]
-        dF = self.config["dF"]
-        nF = self.config["nF"]
-        fmin = self.config["fmin"]
+        n = raw.shape[0]
+        stride = self.model.num_parameters + self.model.num_derived_parameters
+        params = xp.empty((n, stride), np.float64)
+        seg_start = xp.empty(n, np.int32)
+        seg_end = xp.empty(n, np.int32)
+        c = self.config
+        # fmin is the centre of bin 0; the last bin's upper edge is fmin + (nF - 1/2) dF.
+        f_lo, f_hi = c["fmin"], c["fmin"] + (c["nF"] - 0.5) * c["dF"]
+        self.backend.core.prepare(
+            self.model.kernel_id,
+            raw,
+            params,
+            seg_start,
+            seg_end,
+            grid,
+            f_lo,
+            f_hi,
+            self.backend.stream_ptr(),
+        )
+        return params, seg_start, seg_end
 
-        # Only used for the frequency band, which is used to compute the time bounds for each source.
-        # Remeber fmin is the central frequency of the first bin. 
-        # the last bin's upper edge is half a bin further: fmin + (nF − 1)·dF + ½dF = fmin + (nF − ½)·dF;
-        frequency_band = (fmin, fmin + (nF - 0.5)*dF)
-
-        # Fill in segment start and end indices based on the model's time bounds for the given parameters and frequency band.
-        #   If no bounds are returned, default to the full segment.
-        #   Used to work out which time-segments the statistics/waveforms should actually be computed for.
-        bounds = self.model.get_time_bounds(parameters_cache, frequency_band)
-
-        if bounds is None:
-            segment_start_inds = xp.zeros(
-                parameters_cache.shape[0], dtype=np.int32
+    def _response_parameters(self, parameters_response, raw, n_sources):
+        if parameters_response is None:
+            if self.tdi_type is not None:
+                raise ValueError(
+                    "parameters_response must be supplied for TDI generation."
+                )
+            # TT: only the inclination is used; take it from the model's 'cosi'.
+            resp = self.backend.xp.zeros((n_sources, 4), np.float64)
+            if "cosi" in self.model.parameters:
+                resp[:, 0] = raw[:, self.model.parameters.index("cosi")]
+            return resp
+        resp = to_backend(parameters_response, self.backend, np.float64)
+        if resp.ndim == 1:
+            resp = resp[None]
+        if resp.shape != (n_sources, 4):
+            raise ValueError(
+                f"parameters_response must have shape {(n_sources, 4)}"
             )
-            segment_end_inds = xp.full(
-                parameters_cache.shape[0], nT - 1, dtype=np.int32
-            )
+        return resp
 
-        else:
-            t_start, t_end = bounds
-
-            segment_start_inds = xp.floor(
-                xp.asarray(t_start, dtype=np.float64) / dT
-            ).astype(np.int32) 
-
-            # A segment that only contains the f_max crossing
-            # is dropped, otherwise f(t_mid) can sit far above f_max and the fdot*dT/2 extrapolation (extra fdot terms in the kernel)
-            # paints the whole band.
-            if use_midpoint:
-                # k here indexes the time points 
-                # (k + 1/2) dT <= t_end (rearrange to get the following for k)
-                segment_end_inds = xp.floor(t_end / dT - 0.5).astype(np.int32)
-            else:
-                # (k + 1) dT <= t_end
-                segment_end_inds = xp.floor(t_end / dT).astype(np.int32) - 1
-    
-
-            # Cliping begin and end segments to be within the valid range of [0, nT-1].
-            segment_start_inds = xp.clip(segment_start_inds, 0, nT - 1)
-
-            # end may be -1 (< start): the source leaves the band before any valid segment -> no segments.
-            # Negative segment indices are already dealt with in the kernel so it is okay. 
-            segment_end_inds = xp.clip(segment_end_inds, -1, nT - 1)
-
-        return segment_start_inds, segment_end_inds
-
+    # ------------------------------------------------------------------ call
     def __call__(
         self,
-        parameters: dict | np.ndarray,
-        channels: np.ndarray | None = None,
-        psds: np.ndarray | None = None,
-        parameters_response: np.ndarray | None = None,
-        out: np.ndarray | None = None,
+        parameters: dict | Any,
+        channels: Any = None,
+        psds: Any = None,
+        parameters_response: Any = None,
+        out: Any = None,
         compute_statistic: bool = False,
-        search_statistic: np.ndarray | None = None,
+        search_statistic: Any = None,
         N_seg: int | None = None,
-        mixed_precision: bool = False,
+        mixed_precision: bool | None = None,
         use_midpoint: bool = True,
-        data_indices: np.ndarray | None = None,
-        invC: np.ndarray | None = None,
+        data_indices: Any = None,
+        invC: Any = None,
         invC_prefolded: bool = False,
     ):
-        """Evaluate the analytic waveform/inner-product statistic/search statistic.
+        """
+        Evaluate waveforms or per-segment inner products.
 
         Parameters
         ----------
         parameters : dict or array_like, shape (n_sources, n_params)
-            Source parameters as a named dict or a 2-D array in model order.
-        channels : array_like or None
-            Data array of shape ``(nT, nF, n_channels)``, or ``(nwalkers, nT, nF, n_channels)`` if gf_mode is True.
-        psds : array_like or None
-            Diagonal noise (generator built with full_invC=False): power spectral densities of shape
-            ``(nT, nF, n_channels)``, or ``(nwalkers, nT, nF, n_channels)`` if gf_mode is True.
-        invC : array_like or None
-            Full noise (generator built with full_invC=True): inverse covariance matrix of shape
-            ``(nT, nF, n_channels, n_channels)``, or ``(nwalkers, nT, nF, n_channels, n_channels)`` if gf_mode is True.
-            The noise array matching the generator's noise model is required for statistic output; if not
-            supplied, the one stored at initialisation is used.
+            Source parameters as a dict keyed by ``model.parameters`` or an
+            array in that order. Scalars / 1-D give a single source (leading
+            axis dropped from the output).
+        channels, psds, invC :
+            Data and noise for ``compute_statistic`` (defaults: stored arrays).
         parameters_response : array_like, shape (n_sources, 4), optional
-            Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``.
-            Required when using TDI.
-        out : array_like or None
-            *Waveform output*: pre-allocated output of shape
-            ``(n_sources, nT, nF, n_channels)``; auto-allocated if ``None``.
-            *Statistic output*: pre-allocated output of shape ``(n_sources, nT, 2)``.
-            Auto-allocated if ``None``.
-        compute_statistic : bool, optional
-            Return the inner-product statistics instead of the channels array.
-            NOTE: Not search statistic values but the per-segment d_h and h_h values. If ``True``, requires PSDs and channels to be supplied either at call time or initialisation.
-        search_statistic : ndarray or None
-            If not None, the output array to store the final semi-coherent search statistic (upsilon) after summing over segments. Must be of shape (n_sources,). Ignored if ``N_seg`` is None.
-        N_seg : int, optional
-            If not None, the number of segments to divide the data into for statistic computation.
-            Ignored if ``compute_statistic=False``.
+            ``[cosi, pol, ecliptic_long, ecliptic_lat]``; required for TDI. The
+            response ``cosi`` sets the mode's spherical harmonics. For TT output
+            without it, the model's ``cosi`` parameter is used.
+        out : backend array, optional
+            Pre-allocated output (waveform: ``(n_sources, nT, nF, n_channels)``,
+            statistic: ``(n_sources, nT, 2)``), complex64/complex128 according
+            to precision. Overwritten.
+        compute_statistic : bool
+            Return per-segment ``<d|h>`` (``[..., 0]``) and ``<h|h>``
+            (``[..., 1]``) instead of the waveform.
         mixed_precision : bool, optional
-            If True, compute the statistic in mixed precision. The precision of the inputs is maintanied to compute
-            waveform-level quantities (such as phase, frequency, amplitude), but single precision is used to construct
-            the time-frequency representation and compute inner products. This can reduce memory usage and increase speed,
-            particularly on GPU, typically with minimal impact on accuracy.
-        use_midpoint : bool, optional
-            Whether to evaluate the mode parameters at the midpoint of the segment, or at the beginning. (Default: True)
-            (Should be set to True in almost all cases)
-        data_indices : array_like, shape (n_sources,), optional
-            Maps each source to its walker: source index -> index along the leading axis of *both*
-            channels and psds. Required when gf_mode is True, and must be None otherwise. With
-            nwalkers=4 walkers at ntemps=2 temperatures the n_sources=8 parameter vectors are laid
-            out walker-fastest, so this is [0, 1, 2, 3, 0, 1, 2, 3].
-        invC_prefolded : bool, optional
-            Full-invC mode only. If True, invC already includes the 4*dF inner-product factor and is passed to the kernels
-            as-is. Lets callers that reuse one invC over many calls (e.g. a global-fit move) fold it once
-            instead of paying a full-size multiply and copy per call. Default False: fold here.
+            ``True`` forces single precision, ``False`` double; default is the
+            generator's ``precision``.
+        use_midpoint : bool
+            Evaluate mode tracks at segment midpoints (default, recommended).
+        invC_prefolded : bool
+            Full-invC only: ``invC`` already includes the ``4 dF`` factor.
+        search_statistic, N_seg, data_indices :
+            Semi-coherent search statistic and global-fit mode are not yet
+            implemented in v2 (``N_seg`` / ``data_indices`` must be None).
+
         Returns
         -------
-        ndarray
-            out ``(n_sources, nT, nF, n_channels)`` when
-            ``return_statistic=False``, or statistic ``(n_sources, nT, 2)``
-            when ``return_statistic=True``.
+        Array in the format of the inputs (NumPy, CuPy, ...): the waveform
+        ``(n_sources, nT, nF, n_channels)`` or the statistic
+        ``(n_sources, nT, 2)``.
         """
+        if N_seg is not None:
+            raise NotImplementedError(
+                "The semi-coherent search statistic (N_seg) is not implemented in the v2 backend yet; "
+                "use pygwtf.legacy.generator, or sum the per-segment statistic."
+            )
+        if data_indices is not None:
+            raise NotImplementedError(
+                "data_indices (global-fit mode) is not implemented in the v2 backend yet."
+            )
         if self.use_tukey and not use_midpoint:
-            raise ValueError("The Tukey Fresnel kernel is midpoint only, use_midpoint must be True when use_tukey is True.")
-
-        xp = self.backend.xp
-        params, single_source = self._load_parameters(parameters)
-        n_sources = params.shape[0]
-
-        segment_start_inds, segment_end_inds = self._compute_segment_indices(
-            params, use_midpoint = use_midpoint,
-        )
-        out_dtype = np.complex64 if mixed_precision else np.complex128
-
-        nT = self.config["nT"]
-        nF = self.config["nF"]
-        dF = self.config["dF"]
-
-
-        # Response parameters ``[cosi, pol, ecliptic_long, ecliptic_lat]``
-        if parameters_response is None:
-            if self.tdi_type is None:
-                # These variables are still required for the evaluation, so fill them in as dummy empty arrays.
-                parameters_response = xp.zeros(
-                    (n_sources, 4), dtype=np.float64
-                )
-            else:
-                raise ValueError(
-                    "parameters_response must be supplied for TDI generation."
-                )
-        else:
-            assert parameters_response.shape == (n_sources, 4), (
-                f"parameters_response must have shape {(n_sources, 4)}"
-            )
-
-        # Resolve the data/PSD arrays stored at construction before validating against them.
-        if compute_statistic:
-            if channels is None:
-                channels = self.channels
-                assert channels is not None, (
-                    "Channels must be supplied to compute the statistic."
-                )
-            if self.full_invC:
-                assert psds is None, (
-                    "This generator uses the full inverse covariance (full_invC=True): pass invC, not psds."
-                )
-                noise = self.invC if invC is None else invC
-                noise_name = "invC"
-            else:
-                assert invC is None, (
-                    "This generator uses diagonal noise (full_invC=False): pass psds, not invC. "
-                    "Construct it with invC=... or full_invC=True for the full inverse covariance."
-                )
-                assert not invC_prefolded, "invC_prefolded only applies to full-invC generators."
-                noise = self.psds if psds is None else psds
-                noise_name = "psds"
-            assert noise is not None, f"{noise_name} must be supplied to compute the statistic."
-
-            # The kernels bound frequency indices by config nF, not by the array width, and CUDA does not bounds-check,
-            # so data/noise arrays narrower than nF are read out of bounds silently.
-            # Check channels against (nT, nF, n_channels) and the noise against (nT, nF, n_channels) for psds or
-            # (nT, nF, n_channels, n_channels) for invC, each with a leading nwalkers axis in gf_mode.
-            data_shape = (self.config["nT"], self.config["nF"], self.n_channels)
-            lead = 1 if self.gf_mode else 0
-            for name, arr, expected_shape in (
-                ("channels", channels, data_shape),
-                (noise_name, noise, data_shape + ((self.n_channels,) if self.full_invC else ())),
-            ):
-                assert arr.ndim == lead + len(expected_shape) and tuple(arr.shape[lead:]) == expected_shape, (
-                    f"{name} has shape {tuple(arr.shape)}, expected "
-                    f"{'(nwalkers, ' if self.gf_mode else '('}{', '.join(map(str, expected_shape))}) from config."
-                )
-
-        # In global fit mode, data_indices maps each source to its walker, i.e. to the slice of the
-        # data and PSD arrays it is scored against. In non-global fit mode it must be left as None.
-        if self.gf_mode:
-            assert compute_statistic, (
-                "In global fit mode, compute_statistic must be True; global fit mode only supports the per-segment inner-product kernels."
-            ) #TODO change this 
-            assert N_seg is None, (
-                "In global fit mode, N_seg must be None as the semi-coherent search statistic is not supported in global fit mode."
-            )
-            assert data_indices is not None, (
-                "In global fit mode, data_indices must be supplied to map sources to walkers."
-            )
-            # Convert data indices to an xp array for the kernel call.
-            data_indices = xp.asarray(data_indices, dtype=np.int32)
-            assert data_indices.shape == (n_sources,), (
-                f"data_indices must have shape {(n_sources,)}, got {tuple(data_indices.shape)}."
-            )
-            nwalkers = channels.shape[0]
-            assert noise.shape[0] == nwalkers, (
-                f"In global fit mode there must be one {noise_name} per walker: channels has "
-                f"{nwalkers} walkers but {noise_name} has {noise.shape[0]}."
-            )
-            assert (
-                0 <= int(data_indices.min()) and int(data_indices.max()) < nwalkers
-            ), (
-                f"data_indices must lie in [0, {nwalkers - 1}] — "
-                f"there are only {nwalkers} walkers."
-            )
-        elif data_indices is None:
-            # Unused, but required for the kernel call signature: None cannot be a CUDA kernel argument
-            data_indices = xp.arange(1, dtype=np.int32)
-        else:
             raise ValueError(
-                "data_indices is only used in global fit mode, and must be None otherwise."
+                "The Tukey Fresnel kernel is midpoint only, use_midpoint must be True when use_tukey is True."
             )
 
-        # Branch: Compute either d_h and h_h per segment, or the semi-coherent search statistics.
+        precision = self._resolve_precision(mixed_precision)
+        fmt = ArrayFormat.from_inputs(
+            parameters, channels, psds, invC, parameters_response
+        )
+        xp = self.backend.xp
+        core = self.backend.core
+        stream = self.backend.stream_ptr()
+        grid = self._grid(use_midpoint)
+
+        raw, single = self._raw_parameters(parameters)
+        n = raw.shape[0]
+        params, seg_start, seg_end = self._prepare(raw, grid)
+        response = self._response_parameters(parameters_response, raw, n)
+        orbits, ltts = self._detector(precision)
+        window = WINDOW_TUKEY if self.use_tukey else WINDOW_BOXCAR
+        cdt = COMPLEX_DTYPE[precision]
+        nT, nF = self.config["nT"], self.config["nF"]
+
         if compute_statistic:
-            if parameters_response is None:
-                parameters_response = xp.zeros(
-                    (n_sources, 4), dtype=np.float64
-                )
-
-            # Fold 4*dF into the inverse covariance once here; the kernels carry invC (not d*invC),
-            # since h_h needs the full invC anyway. i,j are the channel indices {A,E,T}
-            #  
-            #<d|h> = 4 * dF * d_{i}(f)^* invC_{ij}(f) h_{j}(f) = [4*dF * d_{i}(f)^* invC_{ij}(f)) h_{j](f) 
-            # Skipped if the caller already folded it (invC_prefolded=True): avoids a full-size copy per call.
-            # Diagonal noise: pass 1/psd * 4*dF so the inner loop multiplies instead of dividing (as before).
-            if self.full_invC:
-                inv_covariances = noise if invC_prefolded else noise * 4 * dF
-            else:
-                inv_covariances = 1.0 / noise * 4 * dF
-
-
-            # Branch: Compute d_h and h_h per segment.
-            # NOTE: This is the usual default branch for Global-fit. 
-            if N_seg is None:
-                # If out is not supplied, allocate an array for the per-segment statistics (d_h and h_h) with shape (n_sources, nT, 2).
-                #   If out is supplied, it will be used to store the per-segment statistics, and should have shape (n_sources, nT, 2).
-                if out is None:
-                    # Allocate output array for statistic, shape (n_sources, nT, 2) for d_h, h_h.
-                    # This array will be filled in by the kernel
-                    out = xp.zeros((n_sources, nT, 2), dtype=out_dtype)
-                else:
-                    # If output array is supplied, zero it as a safety measure to ensure no uninitialised values are used.
-                    out.fill(0.0)
-
-                # Statistic kernel is responsible for computing waveforms->response->TDI->inner-products->statistics.
-                self.statistic_kernel(
-                    n_sources,
-                    channels,
-                    segment_start_inds,
-                    segment_end_inds,
-                    params,
-                    parameters_response,
-                    self.spacecraft_orbits,
-                    self.spacecraft_ltts,
-                    out,
-                    inv_covariances,
-                    mixed_precision,
-                    use_midpoint,
-                    data_indices,
-                )
-            # Branch: Compute the semi-coherent search-statistic.
-            #   NOTE: This branch/option does not return d_h and h_h at a time-segment level
-            #   It returns the direct summed semi-coherent statistic for the whole signal evalution for each source.
-            else:
-                # If search_statistic output array is not supplied, allocate an array to store the semi-coherent search statistic (upsilon) with shape (n_sources,).
-                if search_statistic is None:
-                    if mixed_precision:
-                        search_statistic = xp.zeros(
-                            n_sources, dtype=np.float32
-                        )
-                    else:
-                        search_statistic = xp.zeros(
-                            n_sources, dtype=np.float64
-                        )
-
-                self.semi_coherent_statistic_kernel(
-                    n_sources,
-                    channels,
-                    segment_start_inds,
-                    segment_end_inds,
-                    params,
-                    parameters_response,
-                    self.spacecraft_orbits,
-                    self.spacecraft_ltts,
-                    search_statistic,
-                    inv_covariances,
-                    N_seg,
-                    mixed_precision,
-                    use_midpoint,
-                )
-                # Output is search statistic in this case.
-                out = search_statistic
-
-        # Branch: Compute waveforms/TDI channels. No statistic computation.
-        else:
-            if out is None:
-                out = xp.zeros(
-                    (n_sources, nT, nF, self.n_channels), dtype=out_dtype
-                )
-            self.waveform_kernel(
-                n_sources,
-                out,
-                segment_start_inds,
-                segment_end_inds,
-                params,
-                parameters_response,
-                self.spacecraft_orbits,
-                self.spacecraft_ltts,
-                xp.zeros(1, dtype=out_dtype),
-                xp.zeros(1, dtype=np.float32)
-                if mixed_precision
-                else xp.zeros(1, dtype=np.float64),
-                mixed_precision,
-                use_midpoint,
-                data_indices,
+            data, w, scale = self._noise_inputs(
+                channels, psds, invC, invC_prefolded, precision
             )
+            shape = (n, nT, 2)
+            out = (
+                xp.empty(shape, cdt)
+                if out is None
+                else self._check_out(out, shape, cdt)
+            )
+            core.statistic(
+                grid,
+                self.model.kernel_id,
+                n,
+                params,
+                None,
+                None,
+                seg_start,
+                seg_end,
+                response,
+                self._response_kind,
+                orbits,
+                ltts,
+                window,
+                PRECISION_CODE[precision],
+                NOISE_FULL if self.full_invC else NOISE_DIAGONAL,
+                data,
+                w,
+                out,
+                scale,
+                stream,
+            )
+        else:
+            shape = (n, nT, nF, self.n_channels)
+            if out is None:
+                out = xp.zeros(shape, cdt)
+            else:
+                self._check_out(out, shape, cdt).fill(0)
+            core.waveform(
+                grid,
+                self.model.kernel_id,
+                n,
+                params,
+                None,
+                None,
+                seg_start,
+                seg_end,
+                response,
+                self._response_kind,
+                orbits,
+                ltts,
+                window,
+                PRECISION_CODE[precision],
+                out,
+                1.0,
+                stream,
+            )
+        return fmt.wrap(out[0] if single else out, self.backend)
 
-        return out[0] if single_source else out
+    # ------------------------------------------------------------------ extras
+    def tracks(self, parameters: dict | Any, use_midpoint: bool = True):
+        """
+        Mode tracks of the analytic model on the segment grid.
+
+        Returns an array of shape ``(n_sources, n_modes, nT, 4)`` holding
+        ``(amp, phi, f, fdot)`` at each segment's evaluation time -- the input
+        format of :class:`~pygwtf.multimode.MultipleHarmonicTimeFrequencyWaveform`.
+        """
+        fmt = ArrayFormat.from_inputs(parameters)
+        grid = self._grid(use_midpoint)
+        raw, single = self._raw_parameters(parameters)
+        params, _, _ = self._prepare(raw, grid)
+        out = self.backend.xp.empty(
+            (raw.shape[0], self.model.num_modes, self.config["nT"], 4),
+            np.float64,
+        )
+        self.backend.core.tracks(
+            self.model.kernel_id, params, grid, out, self.backend.stream_ptr()
+        )
+        return fmt.wrap(out[0] if single else out, self.backend)
+
+    def segment_indices(
+        self, parameters: dict | Any, use_midpoint: bool = True
+    ):
+        """First and last in-band segment index per source (as used by the kernels)."""
+        fmt = ArrayFormat.from_inputs(parameters)
+        raw, single = self._raw_parameters(parameters)
+        _, s0, s1 = self._prepare(raw, self._grid(use_midpoint))
+        if single:
+            s0, s1 = s0[0], s1[0]
+        return fmt.wrap(s0, self.backend), fmt.wrap(s1, self.backend)

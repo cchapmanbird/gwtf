@@ -1,8 +1,10 @@
 """
-pygwtf: A Python package for time-frequency analysis of gravitational wave data.
+pygwtf: time-frequency waveforms and likelihoods for slowly-evolving GW sources.
 """
-# from pygwtf import AnalyticTimeFrequencyWaveform
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = version("pygwtf")
+try:
+    __version__ = version("pygwtf")
+except PackageNotFoundError:  # running from a source tree without installation
+    __version__ = "0+unknown"
