@@ -186,16 +186,6 @@ def test_validation_errors():
         gt(t2_params(), use_midpoint=False)
 
 
-def test_extension_points_not_implemented():
-    with pytest.raises(NotImplementedError, match="Global-fit"):
-        AnalyticTimeFrequencyWaveform(TaylorT2Ecc, dict(CONFIG), gf_mode=True)
-    g = AnalyticTimeFrequencyWaveform(TaylorT2Ecc, dict(CONFIG))
-    with pytest.raises(NotImplementedError, match="semi-coherent"):
-        g(t2_params(), N_seg=4)
-    with pytest.raises(NotImplementedError, match="data_indices"):
-        g(t2_params(), data_indices=np.zeros(1, int))
-
-
 def test_core_rejects_bad_arrays():
     core = get_backend("cpu").core
     g = core.Grid()

@@ -13,6 +13,7 @@
 // by the dispatch_* functions at the bottom.
 #pragma once
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -97,7 +98,7 @@ struct SegmentEvaluator {
     const int32_t* seg_start;
     const int32_t* seg_end;
     cplx<Real> tukey_tp;     // 0.25 exp(i pi (1 - alpha) / alpha)
-    double amp_scale;        // amplitude rescaling (see StatisticArgs)
+    double amp_scale;        // amplitude rescaling (see NoiseArgs::scale)
 
     GWTF_HD bool in_band(int64_t s, int t) const { return t >= seg_start[s] && t <= seg_end[s]; }
 
@@ -151,31 +152,68 @@ struct SegmentEvaluator {
 
 template <typename Real, int NCH, NoiseKind NK>
 struct NoiseView {
-    const cplx<Real>* data;  // (nT, nF, NCH)
-    const void* weights;
+    static constexpr int W = NK == NoiseKind::Diagonal ? NCH : NCH * NCH;
+    using Weight = std::conditional_t<NK == NoiseKind::Diagonal, Real, cplx<Real>>;
+
+    const cplx<Real>* data;  // (nT, nF, NCH) of the selected copy
+    const Weight* weights;   // (nT, nF, W) of the selected copy
+    Real scale;              // multiplies the data on load (see NoiseArgs)
+    // Per-source copy selection (global-fit mode); see NoiseArgs.
+    const int32_t* index;    // nullptr: everything shared
+    int32_t n_data;
+    int64_t data_stride;     // elements between copies (0: shared)
+    int64_t weight_stride;
+
+    static NoiseView from(const NoiseArgs& a, const Grid& g) { return from(a, g.nT, g.nF); }
+    static NoiseView from(const NoiseArgs& a, int32_t nT, int32_t nF)
+    {
+        const int64_t bins = int64_t(nT) * nF;
+        return NoiseView{static_cast<const cplx<Real>*>(a.data), static_cast<const Weight*>(a.weights),
+                         Real(a.scale), a.index, a.n_data,
+                         a.data_batched ? bins * NCH : 0, a.weights_batched ? bins * W : 0};
+    }
+
+    // The view source s is scored against; false if its data index is invalid.
+    GWTF_HD bool select(int64_t s, NoiseView& v) const
+    {
+        v = *this;
+        if (!index)
+            return true;
+        const int32_t k = index[s];
+        if (k < 0 || k >= n_data)
+            return false;
+        v.data += k * data_stride;
+        v.weights += k * weight_stride;
+        return true;
+    }
 
     // <d|h> and <h|h> contributions of the channel vector h at bin tf = t nF + f.
     GWTF_HD void accumulate(int64_t tf, const cplx<Real>* h, cplx<Real>& dh, Real& hh) const
     {
         const cplx<Real>* d = data + tf * NCH;
+        const Weight* w = weights + tf * W;
         if constexpr (NK == NoiseKind::Diagonal) {
-            const Real* w = static_cast<const Real*>(weights) + tf * NCH;
             for (int c = 0; c < NCH; ++c) {
-                dh += conj_mul(d[c], h[c]) * w[c];
+                dh += conj_mul(d[c] * scale, h[c]) * w[c];
                 hh += norm2(h[c]) * w[c];
             }
         } else {
-            const cplx<Real>* W = static_cast<const cplx<Real>*>(weights) + tf * NCH * NCH;
             for (int i = 0; i < NCH; ++i) {
                 cplx<Real> Wh;
                 for (int j = 0; j < NCH; ++j)
-                    Wh += W[i * NCH + j] * h[j];
-                dh += conj_mul(d[i], Wh);
+                    Wh += w[i * NCH + j] * h[j];
+                dh += conj_mul(d[i] * scale, Wh);
                 hh += conj_mul(h[i], Wh).re;  // real for Hermitian invC
             }
         }
     }
 };
+
+template <typename Real>
+GWTF_HD inline Real quiet_nan()
+{
+    return Real(NAN);
+}
 
 // out += v, atomically on the device (the host backend is serial).
 template <typename T>
@@ -225,7 +263,9 @@ struct StatisticBody {
     NoiseView<Real, NCH, NK> nv;
     cplx<Real>* out;  // (n_src, nT, 2)
 
-    GWTF_HD void self_terms(const SM& sm, int t, cplx<Real>& dh, Real& hh) const
+    using NV = NoiseView<Real, NCH, NK>;
+
+    GWTF_HD void self_terms(const SM& sm, int t, const NV& v, cplx<Real>& dh, Real& hh) const
     {
         const int64_t tf0 = int64_t(t) * ev.g.nF;
         for (int f = sm.f_lo; f <= sm.f_hi; ++f) {
@@ -233,7 +273,7 @@ struct StatisticBody {
             cplx<Real> h[NCH];
             for (int c = 0; c < NCH; ++c)
                 h[c] = sm.coef[c] * F;
-            nv.accumulate(tf0 + f, h, dh, hh);
+            v.accumulate(tf0 + f, h, dh, hh);
         }
     }
 
@@ -242,11 +282,17 @@ struct StatisticBody {
         const int nT = ev.g.nT;
         const int64_t s = idx / nT;
         const int t = int(idx - s * nT);
+        NV v;
+        if (!nv.select(s, v)) {
+            out[idx * 2 + 0] = cplx<Real>(quiet_nan<Real>(), quiet_nan<Real>());
+            out[idx * 2 + 1] = cplx<Real>(quiet_nan<Real>(), Real(0));
+            return;
+        }
         cplx<Real> dh;
         Real hh = Real(0);
         if (ev.in_band(s, t)) {
             if constexpr (Cap <= 1) {
-                ev.for_each_mode(s, t, [&](const SM& sm) { self_terms(sm, t, dh, hh); });
+                ev.for_each_mode(s, t, [&](const SM& sm) { self_terms(sm, t, v, dh, hh); });
             } else {
                 // Multi-mode, cross terms included: the inner products are taken of
                 // the summed signal H(f) = sum_j h_j(f), since |H|^2 contains every
@@ -280,7 +326,7 @@ struct StatisticBody {
                         ++k1;
                     }
                     if (k1 == k0 + 1) {
-                        self_terms(modes[order[k0]], t, dh, hh);
+                        self_terms(modes[order[k0]], t, v, dh, hh);
                     } else {
                         for (int f = modes[order[k0]].f_lo; f <= hi; ++f) {
                             cplx<Real> H[NCH];
@@ -292,7 +338,7 @@ struct StatisticBody {
                                 for (int c = 0; c < NCH; ++c)
                                     H[c] += sm.coef[c] * F;
                             }
-                            nv.accumulate(tf0 + f, H, dh, hh);
+                            v.accumulate(tf0 + f, H, dh, hh);
                         }
                     }
                     k0 = k1;
@@ -323,6 +369,14 @@ struct ModeStatisticBody {
         const int t = int(idx - sm_idx * nT);
         const int64_t s = sm_idx / n_modes;
         const int m = int(sm_idx - s * n_modes);
+        Real* o = reinterpret_cast<Real*>(out + (s * nT + t) * 2);
+        NoiseView<Real, Ev::NCH, NK> v;
+        if (!nv.select(s, v)) {
+            accumulate_out(o + 0, quiet_nan<Real>());
+            accumulate_out(o + 1, quiet_nan<Real>());
+            accumulate_out(o + 2, quiet_nan<Real>());
+            return;
+        }
         if (!ev.in_band(s, t))
             return;
         cplx<Real> dh;
@@ -335,13 +389,12 @@ struct ModeStatisticBody {
                 cplx<Real> h[Ev::NCH];
                 for (int c = 0; c < Ev::NCH; ++c)
                     h[c] = sm.coef[c] * F;
-                nv.accumulate(tf0 + f, h, dh, hh);
+                v.accumulate(tf0 + f, h, dh, hh);
             }
             any = true;
         });
         if (!any)
             return;
-        Real* o = reinterpret_cast<Real*>(out + (s * nT + t) * 2);
         accumulate_out(o + 0, dh.re);
         accumulate_out(o + 1, dh.im);
         accumulate_out(o + 2, hh);
@@ -351,7 +404,7 @@ struct ModeStatisticBody {
 // Dense inner products of a full time-frequency waveform array.
 template <typename Real, int NCH, NoiseKind NK>
 struct InnerProductBody {
-    NoiseView<Real, NCH, NK> nv;
+    NoiseView<Real, NCH, NK> nv;  // nv.scale also multiplies h on load
     const cplx<Real>* h;  // (n_src, nT, nF, NCH)
     int32_t nT, nF;
     cplx<Real>* out;
@@ -360,13 +413,59 @@ struct InnerProductBody {
     {
         const int64_t s = idx / nT;
         const int t = int(idx - s * nT);
+        NoiseView<Real, NCH, NK> v;
+        if (!nv.select(s, v)) {
+            out[idx * 2 + 0] = cplx<Real>(quiet_nan<Real>(), quiet_nan<Real>());
+            out[idx * 2 + 1] = cplx<Real>(quiet_nan<Real>(), Real(0));
+            return;
+        }
         cplx<Real> dh;
         Real hh = Real(0);
         const cplx<Real>* row = h + idx * int64_t(nF) * NCH;
-        for (int f = 0; f < nF; ++f)
-            nv.accumulate(int64_t(t) * nF + f, row + f * NCH, dh, hh);
+        for (int f = 0; f < nF; ++f) {
+            cplx<Real> hs[NCH];
+            for (int c = 0; c < NCH; ++c)
+                hs[c] = row[f * NCH + c] * v.scale;
+            v.accumulate(int64_t(t) * nF + f, hs, dh, hh);
+        }
         out[idx * 2 + 0] = dh;
         out[idx * 2 + 1] = cplx<Real>(hh, Real(0));
+    }
+};
+
+// Semi-coherent reduction of per-tranche statistics (see SemiCoherentArgs),
+// one task per (source, segment), idx = s * n_seg + n, each adding its
+// |<d|h>_n|^2 / <h|h>_n into out[s] (zeroed beforehand).
+template <typename Real>
+struct SemiCoherentBody {
+    const cplx<Real>* stat;  // (n_src, nT, 2)
+    const int32_t* seg_start;
+    const int32_t* seg_end;
+    double* out;
+    int32_t nT, n_seg;
+    SegmentSplit split;
+
+    GWTF_HD void operator()(int64_t idx) const
+    {
+        const int64_t s = idx / n_seg;
+        const int64_t n = idx - s * n_seg;
+        const int64_t t0 = seg_start[s];
+        const int64_t L = int64_t(seg_end[s]) - t0 + 1;
+        if (L <= 0)
+            return;
+        const int64_t per = L / n_seg;
+        const int64_t b = t0 + (split == SegmentSplit::Spread ? n * L / n_seg : n * per);
+        const int64_t e = t0 + (split == SegmentSplit::Spread ? (n + 1) * L / n_seg : (n + 1) * per);
+        const cplx<Real>* row = stat + s * int64_t(nT) * 2;
+        double dr = 0.0, di = 0.0, hh = 0.0;
+        for (int64_t t = b; t < e; ++t) {
+            dr += double(row[2 * t].re);
+            di += double(row[2 * t].im);
+            hh += double(row[2 * t + 1].re);
+        }
+        // Empty / signal-free segments add nothing; NaN propagates.
+        if (hh != 0.0)
+            accumulate_out(out + s, (dr * dr + di * di) / hh);
     }
 };
 
@@ -588,14 +687,14 @@ void dispatch_statistic(Exec& ex, const StatisticArgs& a)
             using Resp = decltype(resp);
             with_window(a.window, a.grid, [&](auto wt) {
                 constexpr WindowKind WK = decltype(wt)::value;
-                with_noise(a.noise, [&](auto nt) {
+                with_noise(a.noise.kind, [&](auto nt) {
                     constexpr NoiseKind NK = decltype(nt)::value;
                     auto* out = static_cast<cplx<Real>*>(a.out);
                     auto make_ev = [&](auto src) {
                         return SegmentEvaluator<Real, decltype(src), Resp, WK>{
                             a.grid, src, resp, a.src.response, a.src.seg_start, a.src.seg_end,
                             tukey_taper_phase<Real>(a.window == WindowKind::Tukey ? a.grid.tukey_alpha : 1.0),
-                            a.amp_scale};
+                            a.noise.scale};
                     };
                     const bool self_terms_only = a.src.model == numerical_model_id
                                                  && a.src.n_modes > 1
@@ -606,7 +705,7 @@ void dispatch_statistic(Exec& ex, const StatisticArgs& a)
                             a.src.tracks, static_cast<const cplx<double>*>(a.src.ylms),
                             a.src.n_modes, a.grid.nT});
                         using Ev = std::remove_const_t<decltype(ev)>;
-                        NoiseView<Real, Ev::NCH, NK> nv{static_cast<const cplx<Real>*>(a.data), a.weights};
+                        const auto nv = NoiseView<Real, Ev::NCH, NK>::from(a.noise, a.grid);
                         if (a.mode == StatisticMode::ModeParallel) {
                             ex.zero(a.out, size_t(a.src.n_src) * size_t(a.grid.nT) * 2 * sizeof(cplx<Real>));
                             ModeStatisticBody<Ev, Real, NK> body{ev, nv, out, a.src.n_modes};
@@ -623,7 +722,7 @@ void dispatch_statistic(Exec& ex, const StatisticArgs& a)
                         using Src = decltype(src);
                         const auto ev = make_ev(src);
                         using Ev = std::remove_const_t<decltype(ev)>;
-                        NoiseView<Real, Ev::NCH, NK> nv{static_cast<const cplx<Real>*>(a.data), a.weights};
+                        const auto nv = NoiseView<Real, Ev::NCH, NK>::from(a.noise, a.grid);
                         StatisticBody<Ev, Real, NK, Src::fused_capacity> body{ev, nv, out};
                         ex.launch(a.src.n_src * a.grid.nT, body);
                     });
@@ -638,11 +737,11 @@ void dispatch_inner_product(Exec& ex, const InnerProductArgs& a)
 {
     with_precision(a.precision, [&](auto rt) {
         using Real = typename decltype(rt)::type;
-        with_noise(a.noise, [&](auto nt) {
+        with_noise(a.noise.kind, [&](auto nt) {
             constexpr NoiseKind NK = decltype(nt)::value;
             auto go = [&](auto nch) {
                 constexpr int NCH = decltype(nch)::value;
-                NoiseView<Real, NCH, NK> nv{static_cast<const cplx<Real>*>(a.data), a.weights};
+                const auto nv = NoiseView<Real, NCH, NK>::from(a.noise, a.nT, a.nF);
                 InnerProductBody<Real, NCH, NK> body{nv, static_cast<const cplx<Real>*>(a.h), a.nT,
                                                      a.nF, static_cast<cplx<Real>*>(a.out)};
                 ex.launch(a.n_src * a.nT, body);
@@ -654,6 +753,22 @@ void dispatch_inner_product(Exec& ex, const InnerProductArgs& a)
             default: throw std::invalid_argument("pygwtf: inner_product supports 1-3 channels");
             }
         });
+    });
+}
+
+template <class Exec>
+void dispatch_semicoherent(Exec& ex, const SemiCoherentArgs& a)
+{
+    if (a.n_seg < 1)
+        throw std::invalid_argument("pygwtf: N_seg must be at least 1");
+    if (a.split != SegmentSplit::Spread && a.split != SegmentSplit::Truncate)
+        throw std::invalid_argument("pygwtf: unknown segment split");
+    with_precision(a.precision, [&](auto rt) {
+        using Real = typename decltype(rt)::type;
+        SemiCoherentBody<Real> body{static_cast<const cplx<Real>*>(a.stat), a.seg_start, a.seg_end,
+                                    a.out, a.nT, a.n_seg, a.split};
+        ex.zero(a.out, size_t(a.n_src) * sizeof(double));
+        ex.launch(a.n_src * a.n_seg, body);
     });
 }
 

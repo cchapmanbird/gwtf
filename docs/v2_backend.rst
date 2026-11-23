@@ -120,14 +120,64 @@ they are a few per cent of ``<h|h>`` per segment, and typically 1e-4 to 1e-3
 once summed over segments (more if the spacing stays near a whole number of
 bins), so only drop them when that is acceptable.
 
+Global-fit mode
+---------------
+
+A global fit computes ``n_sources = n_walkers x n_temps`` inner products per call,
+each as a function of individual residuals and/or noises. ``channels`` and the
+noise (``psds`` or ``invC``) can each carry a leading ``n_walkers`` axis,
+independently (e.g. per-walker residuals with one common PSD), and
+``data_indices`` (shape ``(n_sources,)``) indicates the walker of each source::
+
+    idx = np.tile(np.arange(n_walkers), n_temps)   # walker-fastest layout
+    gen = AnalyticTimeFrequencyWaveform(Model, config, tdi_type=2,
+                                        psds=psds_per_walker, gf_mode=True)
+    for step in sampler:
+        stat = gen(params, parameters_response=resp, channels=residuals,
+                   data_indices=idx, compute_statistic=True)
+        ...
+        gen.psds = new_psds   # after a noise update: refreshes the weights
+
+Passing ``data_indices`` is what selects per-walker data.
+
+Memory traffic per call is kept to what changes:
+
+* Data are read in place when they are C-contiguous in the compute precision
+  (complex64 for ``precision="single"``): the single-precision rescaling
+  (weights / s^2, amplitudes and data times s) is applied inside the kernels
+  rather than to a copy of the data. Otherwise one cast copy is made.
+* Noise weights are prepared into the output dtype and cached for the stored arrays 
+  until they are reassigned. Noise passed at call time is prepared each call.
+
+Semi-coherent statistic
+-----------------------
+
+With ``N_seg``, a statistic call returns the semi-coherent statistic of
+arXiv:2510.19047 (Eq. 8) per source, as float64::
+
+    Upsilon = sum_n |<d|h>_n|^2 / <h|h>_n
+
+where ``<.|.>_n`` sums the tranches of segment ``n``. The segments split each
+source's own in-band tranches ``[seg_start, seg_end]`` (``segment_indices``),
+so a source that leaves the band early has shorter segments than one that
+lasts the whole observation. ``N_seg=1`` is the coherent
+``|<d|h>|^2 / <h|h>``.
+
+* ``segment_split="spread"`` (default): with ``L`` in-band tranches, segment
+  ``n`` covers ``[n L // N_seg, (n + 1) L // N_seg)``, so every tranche is
+  used and lengths differ by at most one.
+* ``segment_split="truncate"``: the v1 convention, ``L // N_seg`` tranches
+  each, and the last ``L % N_seg`` dropped.
+
+Segments with ``<h|h>_n = 0`` (including the empty segments when
+``L < N_seg``) contribute nothing. The reduction is a separate, cheap step 
+after the per-tranche statistic kernel (one task per source and segment), 
+so it works unchanged for global-fit calls, for multi-mode sources 
+(whose in-band range is taken from the tracks, or passed as ``segment_ranges``) 
+and, through ``semi_coherent_statistic``, for any statistic array.
+
 Not yet implemented (extension points)
 --------------------------------------
 
-* **Global-fit mode** (per-walker data and noise, ``gf_mode`` /
-  ``data_indices``): ``NoiseView`` in ``ops.hpp`` is the single place where
-  data and weights are indexed; a per-source batch offset slots in there.
-* **Fused semi-coherent search statistic** (``N_seg``): needs a per-source
-  reduction over segments, i.e. a sink that combines the per-segment results
-  of all segment tasks of a source (or a source-major launch).
 * **Runtime (JIT) models**: the headers avoid heavy std dependencies so they
   could be compiled with hipRTC/NVRTC in future.

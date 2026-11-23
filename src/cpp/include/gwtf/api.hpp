@@ -90,20 +90,27 @@ struct WaveformArgs {
     void* stream;
 };
 
+// Data and noise weights for the inner-product kernels.
+struct NoiseArgs {
+    NoiseKind kind;
+    const void* data;     // ([n_data,] nT, nF, n_channels) complex<Real>
+    const void* weights;  // diagonal: ([n_data,] nT, nF, n_channels) Real = 4 dF / psd
+                          // full:     ([n_data,] nT, nF, n_channels, n_channels) complex<Real> = 4 dF invC
+    bool data_batched;
+    bool weights_batched;
+    const int32_t* index; // (n_src,) data copy per source; nullptr unless something is batched
+    int32_t n_data;       // number of copies along the batched axis (1 if none)
+    double scale;         // s above (1 for no rescaling)
+};
+
 struct StatisticArgs {
     Grid grid;
     SourceArgs src;
     DetectorArgs det;
     WindowKind window;
     Precision precision;
-    NoiseKind noise;
+    NoiseArgs noise;      // noise.scale also multiplies every mode amplitude
     StatisticMode mode;
-    // Exact rescaling for the single-precision path: the caller passes
-    // data * s and weights / s^2 and sets amp_scale = s.
-    double amp_scale;
-    const void* data;     // (nT, nF, n_channels) complex<Real>
-    const void* weights;  // diagonal: (nT, nF, n_channels) Real = 4 dF / psd
-                          // full:     (nT, nF, n_channels, n_channels) complex<Real> = 4 dF invC
     void* out;            // (n_src, nT, 2) complex<Real>: <d|h>, <h|h> per segment
     void* stream;
 };
@@ -112,11 +119,39 @@ struct InnerProductArgs {
     int64_t n_src;
     int32_t nT, nF, n_channels;
     Precision precision;
-    NoiseKind noise;
+    NoiseArgs noise;      // noise.scale also multiplies h on load
     const void* h;        // (n_src, nT, nF, n_channels) complex<Real>
-    const void* data;
-    const void* weights;
     void* out;            // (n_src, nT, 2) complex<Real>
+    void* stream;
+};
+
+// How a source's L in-band tranches are split into n_seg semi-coherent
+// segments.
+enum class SegmentSplit : int32_t {
+    // Segment n covers tranches [n L / n_seg, (n + 1) L / n_seg) (integer
+    // division): every tranche is used, lengths differ by at most one.
+    Spread = 0,
+    // v1 convention: L / n_seg tranches each, the last L % n_seg dropped.
+    Truncate = 1,
+};
+
+// Semi-coherent statistic from per-tranche inner products:
+//   Upsilon = sum_n |<d|h>_n|^2 / <h|h>_n,
+// with <.|.>_n summed over the tranches of segment n of the source's in-band
+// range [seg_start, seg_end]. Segments with <h|h>_n = 0 contribute nothing.
+// Accumulated in double whatever the statistic precision (on the GPU the
+// segments of a source are summed atomically, so the last bits of Upsilon
+// can vary between runs).
+struct SemiCoherentArgs {
+    int64_t n_src;
+    int32_t nT;
+    int32_t n_seg;
+    Precision precision;      // of stat
+    SegmentSplit split;
+    const void* stat;         // (n_src, nT, 2) complex<Real>: <d|h>, <h|h>
+    const int32_t* seg_start; // (n_src,)
+    const int32_t* seg_end;   // (n_src,)
+    double* out;              // (n_src,)
     void* stream;
 };
 
@@ -135,6 +170,7 @@ void run_prepare(const PrepareArgs& a);
 void run_waveform(const WaveformArgs& a);
 void run_statistic(const StatisticArgs& a);
 void run_inner_product(const InnerProductArgs& a);
+void run_semicoherent(const SemiCoherentArgs& a);
 void run_tracks(const TrackArgs& a);
 void synchronize(void* stream);
 } // namespace backend

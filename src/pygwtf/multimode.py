@@ -22,6 +22,7 @@ from ._base import (
     WINDOW_BOXCAR,
     WINDOW_TUKEY,
     TimeFrequencyBase,
+    parse_n_seg,
 )
 from ._interop import ArrayFormat, to_backend
 from .backend import Backend
@@ -121,6 +122,44 @@ class MultipleHarmonicTimeFrequencyWaveform(TimeFrequencyBase):
             single,
         )
 
+    def _track_segments(self, tracks):
+        """
+        In-band tranche range per source from backend tracks: first and last
+        tranche where any mode has a usable entry (finite, non-zero amplitude)
+        with its frequency in the grid's band ``[fmin, fmin + (nF - 1/2) dF]``
+        -- the band the analytic models' time bounds use.
+        """
+        xp = self.backend.xp
+        c = self.config
+        nT = c["nT"]
+        f = tracks[..., 2]
+        usable = (
+            xp.isfinite(tracks).all(axis=-1)
+            & (tracks[..., 0] != 0)
+            & (f >= c["fmin"])
+            & (f <= c["fmin"] + (c["nF"] - 0.5) * c["dF"])
+        ).any(axis=1)  # (n_sources, nT)
+        has = usable.any(axis=1)
+        first = xp.argmax(usable, axis=1)
+        last = nT - 1 - xp.argmax(usable[:, ::-1], axis=1)
+        return (
+            xp.where(has, first, 0).astype(np.int32),
+            xp.where(has, last, -1).astype(np.int32),
+        )
+
+    def segment_indices(self, phase_amp_information):
+        """First and last in-band tranche per source, as used for ``N_seg``
+        (see ``_track_segments``); ``end < start`` if none."""
+        fmt = ArrayFormat.from_inputs(phase_amp_information)
+        tracks = to_backend(phase_amp_information, self.backend, np.float64)
+        single = tracks.ndim == 3
+        if single:
+            tracks = tracks[None]
+        s0, s1 = self._track_segments(tracks)
+        if single:
+            s0, s1 = s0[0], s1[0]
+        return fmt.wrap(s0, self.backend), fmt.wrap(s1, self.backend)
+
     def __call__(
         self,
         phase_amp_information: Any,
@@ -135,6 +174,11 @@ class MultipleHarmonicTimeFrequencyWaveform(TimeFrequencyBase):
         invC: Any = None,
         invC_prefolded: bool = False,
         cross_terms: bool = True,
+        data_indices: Any = None,
+        N_seg: int | None = None,
+        search_statistic: Any = None,
+        segment_split: str = "spread",
+        segment_ranges: Any = None,
     ):
         """
         Evaluate waveforms (summed over modes) or per-segment inner products.
@@ -157,6 +201,16 @@ class MultipleHarmonicTimeFrequencyWaveform(TimeFrequencyBase):
             (modes treated as independent). Faster, and appropriate when the
             modes are many kernel widths apart in frequency; see the class
             notes.
+        data_indices : array_like of int, shape (n_sources,), optional
+            Global-fit mode: walker of each source when the data and/or noise
+            carry a leading per-walker axis (see
+            :class:`~pygwtf.generator.AnalyticTimeFrequencyWaveform`).
+        N_seg, search_statistic, segment_split :
+            Semi-coherent statistic, as for the analytic generator.
+        segment_ranges : (array_like, array_like), optional
+            ``(start, end)`` in-band tranche range per source used to define
+            the ``N_seg`` segments. Default: derived from the tracks (see
+            :meth:`segment_indices`).
 
         Other arguments are as for the analytic generator.
         """
@@ -164,6 +218,16 @@ class MultipleHarmonicTimeFrequencyWaveform(TimeFrequencyBase):
             raise ValueError(
                 "The Tukey Fresnel kernel is midpoint only, use_midpoint must be True."
             )
+        if data_indices is not None and not compute_statistic:
+            raise ValueError(
+                "data_indices only applies to statistic calls (compute_statistic=True)."
+            )
+        if N_seg is not None:
+            N_seg = parse_n_seg(N_seg)
+            if not compute_statistic:
+                raise ValueError(
+                    "N_seg (semi-coherent statistic) requires compute_statistic=True."
+                )
         precision = self._resolve_precision(mixed_precision)
         fmt = ArrayFormat.from_inputs(phase_amp_information, channels, y_lms)
         xp = self.backend.xp
@@ -220,8 +284,14 @@ class MultipleHarmonicTimeFrequencyWaveform(TimeFrequencyBase):
             )
 
         if compute_statistic:
-            data, w, scale = self._noise_inputs(
-                channels, psds, invC, invC_prefolded, precision
+            data, w, scale, index = self._noise_inputs(
+                channels,
+                psds,
+                invC,
+                invC_prefolded,
+                precision,
+                data_indices,
+                n,
             )
             shape = (n, nT, 2)
             out = (
@@ -255,10 +325,12 @@ class MultipleHarmonicTimeFrequencyWaveform(TimeFrequencyBase):
                     scale,
                     stream,
                     mode,
+                    data_index=index,
                 )
             else:
                 # Too many modes to keep cross terms in registers: materialise
-                # the (rescaled) waveform and take dense inner products.
+                # the waveform and take dense inner products (which apply the
+                # single-precision rescaling to h and the data on load).
                 nbytes = n * nT * nF * self.n_channels * np.dtype(cdt).itemsize
                 if nbytes > 2**32:
                     warnings.warn(
@@ -267,7 +339,7 @@ class MultipleHarmonicTimeFrequencyWaveform(TimeFrequencyBase):
                         stacklevel=2,
                     )
                 h = xp.zeros((n, nT, nF, self.n_channels), cdt)
-                waveform_into(h, scale)
+                waveform_into(h, 1.0)
                 core.inner_product(
                     h,
                     data,
@@ -276,6 +348,33 @@ class MultipleHarmonicTimeFrequencyWaveform(TimeFrequencyBase):
                     noise_code,
                     out,
                     stream,
+                    data_index=index,
+                    scale=scale,
+                )
+            if N_seg is not None:
+                if segment_ranges is None:
+                    s0, s1 = self._track_segments(tracks)
+                else:
+                    s0, s1 = (
+                        xp.clip(
+                            to_backend(r, self.backend, np.int32).reshape(-1),
+                            lo,
+                            nT - 1,
+                        ).astype(np.int32)
+                        for r, lo in zip(segment_ranges, (0, -1))
+                    )
+                    if s0.shape != (n,) or s1.shape != (n,):
+                        raise ValueError(
+                            f"segment_ranges must be two arrays of shape ({n},)"
+                        )
+                out = self._semicoherent(
+                    out,
+                    s0,
+                    s1,
+                    N_seg,
+                    segment_split,
+                    precision,
+                    search_statistic,
                 )
         else:
             shape = (n, nT, nF, self.n_channels)

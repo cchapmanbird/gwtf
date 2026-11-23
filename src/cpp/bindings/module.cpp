@@ -174,6 +174,48 @@ DetectorArgs make_detector(const Grid& g, int32_t kind, Precision p, const In& o
     return d;
 }
 
+// Data/noise block shared by statistic and inner_product calls. `data` and
+// `weights` are each (nT, nF, nch[, nch]) shared by all sources, or carry a
+// leading axis of n_data copies selected per source by `data_index`.
+NoiseArgs make_noise(int32_t noise, Precision p, int64_t n_src, int64_t nT, int64_t nF, int64_t nch,
+                     const In& data, const In& weights, const In& data_index, double scale)
+{
+    NoiseArgs n{};
+    if (noise != int32_t(NoiseKind::Diagonal) && noise != int32_t(NoiseKind::Full))
+        throw nb::value_error("unknown noise kind");
+    n.kind = NoiseKind(noise);
+    n.scale = scale;
+    const bool full = n.kind == NoiseKind::Full;
+    const size_t data_rank = 3, weight_rank = full ? 4 : 3;
+    n.data_batched = data.is_valid() && data.ndim() == data_rank + 1;
+    n.weights_batched = weights.is_valid() && weights.ndim() == weight_rank + 1;
+    n.n_data = 1;
+    if (n.data_batched || n.weights_batched) {
+        const int64_t nd = n.data_batched ? int64_t(data.shape(0)) : int64_t(weights.shape(0));
+        if (n.data_batched && n.weights_batched && int64_t(weights.shape(0)) != nd)
+            throw nb::value_error("data and weights have different numbers of copies along the leading axis");
+        if (nd < 1 || nd > INT32_MAX)
+            throw nb::value_error("invalid number of data copies");
+        n.n_data = int32_t(nd);
+    }
+    auto lead = [&](bool batched, std::vector<int64_t> shape) {
+        if (batched)
+            shape.insert(shape.begin(), n.n_data);
+        return shape;
+    };
+    n.data = check(data, "data", DT::Complex, p, lead(n.data_batched, {nT, nF, nch}));
+    if (full)
+        n.weights = check(weights, "weights", DT::Complex, p, lead(n.weights_batched, {nT, nF, nch, nch}));
+    else
+        n.weights = check(weights, "weights", DT::Real, p, lead(n.weights_batched, {nT, nF, nch}));
+    if (data_index.is_valid()) {
+        n.index = static_cast<const int32_t*>(check(data_index, "data_index", DT::I32, p, {n_src}));
+    } else if (n.data_batched || n.weights_batched) {
+        throw nb::value_error("batched data/weights need data_index (the data copy of each source)");
+    }
+    return n;
+}
+
 } // namespace
 
 #if defined(GWTF_GPU_MODULE)
@@ -191,6 +233,10 @@ NB_MODULE(_core_cpu, m)
     stat_modes["segment_loop"] = int32_t(StatisticMode::SegmentLoop);
     stat_modes["mode_parallel"] = int32_t(StatisticMode::ModeParallel);
     m.attr("statistic_modes") = stat_modes;
+    nb::dict splits;
+    splits["spread"] = int32_t(SegmentSplit::Spread);
+    splits["truncate"] = int32_t(SegmentSplit::Truncate);
+    m.attr("segment_splits") = splits;
     nb::dict consts;
     consts["MTsun"] = constants::MTsun;
     consts["pc"] = constants::pc;
@@ -275,24 +321,18 @@ NB_MODULE(_core_cpu, m)
            const In& ylms, const In& seg_start, const In& seg_end, const In& response,
            int32_t response_kind, const In& orbits, const In& ltts, int32_t window,
            int32_t precision, int32_t noise, const In& data, const In& weights, Out out,
-           double amp_scale, uintptr_t stream, int32_t mode) {
+           double scale, uintptr_t stream, int32_t mode, const In& data_index) {
             StatisticArgs a{};
             a.grid = g;
-            a.amp_scale = amp_scale;
             if (mode < 0 || mode > int32_t(StatisticMode::ModeParallel))
                 throw nb::value_error("unknown statistic mode");
             a.mode = StatisticMode(mode);
             a.precision = Precision(precision);
             a.window = WindowKind(window);
-            a.noise = NoiseKind(noise);
             a.src = make_sources(g, model, n_src, params, tracks, ylms, seg_start, seg_end, response);
             a.det = make_detector(g, response_kind, a.precision, orbits, ltts);
-            const int64_t nch = n_channels_of(a.det.kind);
-            a.data = check(data, "data", DT::Complex, a.precision, {g.nT, g.nF, nch});
-            if (a.noise == NoiseKind::Diagonal)
-                a.weights = check(weights, "weights", DT::Real, a.precision, {g.nT, g.nF, nch});
-            else
-                a.weights = check(weights, "weights", DT::Complex, a.precision, {g.nT, g.nF, nch, nch});
+            a.noise = make_noise(noise, a.precision, n_src, g.nT, g.nF, n_channels_of(a.det.kind),
+                                 data, weights, data_index, scale);
             a.out = check(out, "out", DT::Complex, a.precision, {n_src, g.nT, 2});
             a.stream = stream_ptr(stream);
             nb::gil_scoped_release release;
@@ -303,18 +343,20 @@ NB_MODULE(_core_cpu, m)
         nb::arg("seg_end"), nb::arg("response"), nb::arg("response_kind"),
         nb::arg("orbits").none(), nb::arg("ltts").none(), nb::arg("window"),
         nb::arg("precision"), nb::arg("noise"), nb::arg("data"), nb::arg("weights"),
-        nb::arg("out"), nb::arg("amp_scale") = 1.0, nb::arg("stream") = 0,
-        nb::arg("mode") = 0,
+        nb::arg("out"), nb::arg("scale") = 1.0, nb::arg("stream") = 0,
+        nb::arg("mode") = 0, nb::arg("data_index").none() = nb::none(),
         "Per-segment <d|h> and <h|h> without materialising the waveform.\n\n"
+        "data/weights may carry a leading axis of per-walker copies, selected per\n"
+        "source by data_index (global-fit mode). scale: single-precision rescaling\n"
+        "(weights passed / scale^2; amplitudes and data multiplied by scale).\n"
         "mode (multi-mode numerical sources only): see statistic_modes.");
 
     m.def(
         "inner_product",
         [](const In& h, const In& data, const In& weights, int32_t precision, int32_t noise,
-           Out out, uintptr_t stream) {
+           Out out, uintptr_t stream, const In& data_index, double scale) {
             InnerProductArgs a{};
             a.precision = Precision(precision);
-            a.noise = NoiseKind(noise);
             if (!h.is_valid() || h.ndim() != 4)
                 throw nb::value_error("h must have shape (n_src, nT, nF, n_channels)");
             a.n_src = int64_t(h.shape(0));
@@ -323,11 +365,7 @@ NB_MODULE(_core_cpu, m)
             a.n_channels = int32_t(h.shape(3));
             const int64_t c = a.n_channels;
             a.h = check(h, "h", DT::Complex, a.precision, {a.n_src, a.nT, a.nF, c});
-            a.data = check(data, "data", DT::Complex, a.precision, {a.nT, a.nF, c});
-            if (a.noise == NoiseKind::Diagonal)
-                a.weights = check(weights, "weights", DT::Real, a.precision, {a.nT, a.nF, c});
-            else
-                a.weights = check(weights, "weights", DT::Complex, a.precision, {a.nT, a.nF, c, c});
+            a.noise = make_noise(noise, a.precision, a.n_src, a.nT, a.nF, c, data, weights, data_index, scale);
             a.out = check(out, "out", DT::Complex, a.precision, {a.n_src, a.nT, 2});
             a.stream = stream_ptr(stream);
             nb::gil_scoped_release release;
@@ -335,7 +373,34 @@ NB_MODULE(_core_cpu, m)
         },
         nb::arg("h"), nb::arg("data"), nb::arg("weights"), nb::arg("precision"),
         nb::arg("noise"), nb::arg("out"), nb::arg("stream") = 0,
-        "Per-segment <d|h>, <h|h> of dense time-frequency waveforms.");
+        nb::arg("data_index").none() = nb::none(), nb::arg("scale") = 1.0,
+        "Per-segment <d|h>, <h|h> of dense time-frequency waveforms (data/weights/\n"
+        "data_index/scale as for statistic; h is multiplied by scale on load).");
+
+    m.def(
+        "semicoherent",
+        [](const In& stat, const In& seg_start, const In& seg_end, int32_t n_seg, int32_t precision,
+           int32_t split, Out out, uintptr_t stream) {
+            SemiCoherentArgs a{};
+            a.precision = Precision(precision);
+            a.split = SegmentSplit(split);
+            a.n_seg = n_seg;
+            if (!stat.is_valid() || stat.ndim() != 3)
+                throw nb::value_error("stat must have shape (n_src, nT, 2)");
+            a.n_src = int64_t(stat.shape(0));
+            a.nT = int32_t(stat.shape(1));
+            a.stat = check(stat, "stat", DT::Complex, a.precision, {a.n_src, a.nT, 2});
+            a.seg_start = static_cast<const int32_t*>(check(seg_start, "seg_start", DT::I32, a.precision, {a.n_src}));
+            a.seg_end = static_cast<const int32_t*>(check(seg_end, "seg_end", DT::I32, a.precision, {a.n_src}));
+            a.out = static_cast<double*>(check(out, "out", DT::F64, a.precision, {a.n_src}));
+            a.stream = stream_ptr(stream);
+            nb::gil_scoped_release release;
+            backend::run_semicoherent(a);
+        },
+        nb::arg("stat"), nb::arg("seg_start"), nb::arg("seg_end"), nb::arg("n_seg"),
+        nb::arg("precision"), nb::arg("split"), nb::arg("out"), nb::arg("stream") = 0,
+        "Semi-coherent statistic sum_n |<d|h>_n|^2 / <h|h>_n over n_seg segments of each\n"
+        "source's in-band tranches [seg_start, seg_end]; split: see segment_splits.");
 
     m.def(
         "tracks",

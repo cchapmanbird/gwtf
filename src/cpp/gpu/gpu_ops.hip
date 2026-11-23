@@ -48,6 +48,7 @@ void run_prepare(const PrepareArgs& a) { auto ex = exec_for(a.stream); dispatch_
 void run_waveform(const WaveformArgs& a) { auto ex = exec_for(a.stream); dispatch_waveform(ex, a); }
 void run_statistic(const StatisticArgs& a) { auto ex = exec_for(a.stream); dispatch_statistic(ex, a); }
 void run_inner_product(const InnerProductArgs& a) { auto ex = exec_for(a.stream); dispatch_inner_product(ex, a); }
+void run_semicoherent(const SemiCoherentArgs& a) { auto ex = exec_for(a.stream); dispatch_semicoherent(ex, a); }
 void run_tracks(const TrackArgs& a) { auto ex = exec_for(a.stream); dispatch_tracks(ex, a); }
 void synchronize(void* stream)
 {

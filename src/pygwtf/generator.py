@@ -17,6 +17,7 @@ from ._base import (
     WINDOW_BOXCAR,
     WINDOW_TUKEY,
     TimeFrequencyBase,
+    parse_n_seg,
 )
 from ._interop import ArrayFormat, to_backend
 from .backend import Backend
@@ -48,7 +49,9 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
     channels, psds, invC :
         Data ``(nT, nF, n_channels)`` and either diagonal PSDs (same shape) or
         a full inverse covariance ``(nT, nF, n_channels, n_channels)``, used
-        when not supplied at call time.
+        when not supplied at call time. Each may instead carry a leading
+        per-walker axis (global-fit mode, see below). Reassigning the
+        attributes (e.g. ``gen.psds = new``) refreshes the prepared copies.
     spacecraft_orbits, spacecraft_ltts :
         ``(nT, 3, 3)`` positions [m] and ``(nT, 3)`` arm lengths [m] for links
         (12, 23, 31). Analytic orbits are used if omitted (TDI only).
@@ -64,7 +67,20 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
     block_vectorised_gpu : bool
         Ignored (v1 launch option; v2 always parallelises over source x segment).
     gf_mode : bool
-        Global-fit (per-walker data) mode is not yet available in v2.
+        Require ``data_indices`` on every statistic call (global-fit mode).
+        Per-walker data work without it: see below.
+
+    Global-fit mode
+    ---------------
+    A global fit scores ``n_sources = n_walkers x n_temps`` proposals against
+    per-walker residuals and/or PSDs. Pass ``channels`` and/or the noise with
+    a leading ``n_walkers`` axis -- either may also be shared, e.g. per-walker
+    residuals with one common PSD -- and map each source to its walker with
+    ``data_indices`` (shape ``(n_sources,)``; walker-fastest layout gives
+    ``np.tile(np.arange(n_walkers), n_temps)``). The data are read in place
+    when already C-contiguous in the compute precision (complex64 for
+    ``precision='single'``), so per-walker residuals cost no copy per call;
+    noise weights are prepared once per stored array.
     """
 
     def __init__(
@@ -84,11 +100,6 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
         full_invC: bool | None = None,
         precision: str = "single",
     ):
-        if gf_mode:
-            raise NotImplementedError(
-                "Global-fit mode (per-walker data) is not implemented in the v2 backend yet; "
-                "use pygwtf.legacy.generator for now."
-            )
         if block_vectorised_gpu:
             warnings.warn(
                 "block_vectorised_gpu has no effect in the v2 backend (kernels always "
@@ -109,7 +120,7 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
             precision=precision,
         )
         self.model = model_class(backend=self.backend)
-        self.gf_mode = False
+        self.gf_mode = bool(gf_mode)
         self.block_vectorised_gpu = False
 
     # ------------------------------------------------------------------ inputs
@@ -200,9 +211,11 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
         data_indices: Any = None,
         invC: Any = None,
         invC_prefolded: bool = False,
+        segment_split: str = "spread",
     ):
         """
-        Evaluate waveforms or per-segment inner products.
+        Evaluate waveforms, per-segment inner products or the semi-coherent
+        statistic.
 
         Parameters
         ----------
@@ -211,7 +224,8 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
             array in that order. Scalars / 1-D give a single source (leading
             axis dropped from the output).
         channels, psds, invC :
-            Data and noise for ``compute_statistic`` (defaults: stored arrays).
+            Data and noise for ``compute_statistic`` (defaults: stored arrays),
+            each shared or with a leading per-walker axis.
         parameters_response : array_like, shape (n_sources, 4), optional
             ``[cosi, pol, ecliptic_long, ecliptic_lat]``; required for TDI. The
             response ``cosi`` sets the mode's spherical harmonics. For TT output
@@ -230,24 +244,46 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
             Evaluate mode tracks at segment midpoints (default, recommended).
         invC_prefolded : bool
             Full-invC only: ``invC`` already includes the ``4 dF`` factor.
-        search_statistic, N_seg, data_indices :
-            Semi-coherent search statistic and global-fit mode are not yet
-            implemented in v2 (``N_seg`` / ``data_indices`` must be None).
+        data_indices : array_like of int, shape (n_sources,), optional
+            Global-fit mode: the walker (index along the leading axis of the
+            per-walker data/noise) each source is scored against. Required
+            when the data or noise is per-walker. Host arrays are
+            range-checked; device arrays are not, and an out-of-range index
+            gives NaN statistics for that source.
+        N_seg : int, optional
+            With ``compute_statistic``, return the semi-coherent statistic
+            ``Upsilon = sum_n |<d|h>_n|^2 / <h|h>_n`` over ``N_seg`` segments
+            of each source's in-band tranches instead of the per-tranche
+            statistic (see :meth:`semi_coherent_statistic`). ``out`` is then
+            used as the per-tranche scratch buffer, if given.
+        search_statistic : backend array, optional
+            Pre-allocated float64 ``(n_sources,)`` output for ``Upsilon``.
+        segment_split : {'spread', 'truncate'}
+            How in-band tranches are split into segments: ``'spread'``
+            (default) uses every tranche, ``'truncate'`` reproduces v1 (drops
+            the remainder). See :meth:`semi_coherent_statistic`.
 
         Returns
         -------
         Array in the format of the inputs (NumPy, CuPy, ...): the waveform
-        ``(n_sources, nT, nF, n_channels)`` or the statistic
-        ``(n_sources, nT, 2)``.
+        ``(n_sources, nT, nF, n_channels)``, the statistic
+        ``(n_sources, nT, 2)`` or, with ``N_seg``, ``Upsilon`` (float64,
+        ``(n_sources,)``).
         """
         if N_seg is not None:
-            raise NotImplementedError(
-                "The semi-coherent search statistic (N_seg) is not implemented in the v2 backend yet; "
-                "use pygwtf.legacy.generator, or sum the per-segment statistic."
+            N_seg = parse_n_seg(N_seg)
+            if not compute_statistic:
+                raise ValueError(
+                    "N_seg (semi-coherent statistic) requires compute_statistic=True."
+                )
+        if data_indices is not None and not compute_statistic:
+            raise ValueError(
+                "data_indices only applies to statistic calls (compute_statistic=True); "
+                "waveforms do not depend on the data."
             )
-        if data_indices is not None:
-            raise NotImplementedError(
-                "data_indices (global-fit mode) is not implemented in the v2 backend yet."
+        if self.gf_mode and compute_statistic and data_indices is None:
+            raise ValueError(
+                "In global-fit mode (gf_mode=True), data_indices must be supplied to map sources to walkers."
             )
         if self.use_tukey and not use_midpoint:
             raise ValueError(
@@ -273,8 +309,14 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
         nT, nF = self.config["nT"], self.config["nF"]
 
         if compute_statistic:
-            data, w, scale = self._noise_inputs(
-                channels, psds, invC, invC_prefolded, precision
+            data, w, scale, index = self._noise_inputs(
+                channels,
+                psds,
+                invC,
+                invC_prefolded,
+                precision,
+                data_indices,
+                n,
             )
             shape = (n, nT, 2)
             out = (
@@ -303,7 +345,18 @@ class AnalyticTimeFrequencyWaveform(TimeFrequencyBase):
                 out,
                 scale,
                 stream,
+                data_index=index,
             )
+            if N_seg is not None:
+                out = self._semicoherent(
+                    out,
+                    seg_start,
+                    seg_end,
+                    N_seg,
+                    segment_split,
+                    precision,
+                    search_statistic,
+                )
         else:
             shape = (n, nT, nF, self.n_channels)
             if out is None:

@@ -25,6 +25,7 @@ void run_prepare(const PrepareArgs& a) { CpuExec ex; dispatch_prepare(ex, a); }
 void run_waveform(const WaveformArgs& a) { CpuExec ex; dispatch_waveform(ex, a); }
 void run_statistic(const StatisticArgs& a) { CpuExec ex; dispatch_statistic(ex, a); }
 void run_inner_product(const InnerProductArgs& a) { CpuExec ex; dispatch_inner_product(ex, a); }
+void run_semicoherent(const SemiCoherentArgs& a) { CpuExec ex; dispatch_semicoherent(ex, a); }
 void run_tracks(const TrackArgs& a) { CpuExec ex; dispatch_tracks(ex, a); }
 void synchronize(void*) {}
 
